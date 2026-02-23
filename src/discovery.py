@@ -61,6 +61,7 @@ from config import (
     TWSCRAPE_COOKIES,
     DISCOVERY_NICHES,
     DISCOVERY_LIMIT_PER_NICHE,
+    DISCOVERY_TOTAL_LIMIT,
     DISCOVERED_TWEETS_FILE,
     WHITELIST_ACCOUNTS,
     WHITELIST_ACCOUNTS_FILE,
@@ -80,6 +81,7 @@ class TweetDiscovery:
         """
         self.niches = niches or DISCOVERY_NICHES
         self.limit = limit_per_niche or DISCOVERY_LIMIT_PER_NICHE
+        self.total_limit = DISCOVERY_TOTAL_LIMIT
         self.discovered_file = DISCOVERED_TWEETS_FILE
 
     def _load_whitelist_accounts(self) -> set[str]:
@@ -153,15 +155,23 @@ class TweetDiscovery:
         """
         logger.info("=" * 50)
         logger.info("🔍 开始自动发现推文...")
-        logger.info(f"   共 {len(self.niches)} 个搜索 niche，每个最多 {self.limit} 条")
+        logger.info(f"   共 {len(self.niches)} 个搜索 niche，本次运行最大总获取数: {self.total_limit} 条")
         logger.info("=" * 50)
 
         api = await self._setup_api()
         discovered = self._load_discovered()
         new_urls = []
 
-        for idx, query in enumerate(self.niches, 1):
-            logger.info(f"[{idx}/{len(self.niches)}] 搜索: {query[:60]}...")
+        # 打乱 niches 的顺序，避免因为达到总上限导致总是忽略后排的 niches
+        search_niches = list(self.niches)
+        random.shuffle(search_niches)
+
+        for idx, query in enumerate(search_niches, 1):
+            if len(new_urls) >= self.total_limit:
+                logger.info(f"🛑 已达到单次运行总获取上限 ({self.total_limit} 条)，结束关键词搜索。")
+                break
+
+            logger.info(f"[{idx}/{len(search_niches)}] 搜索: {query[:60]}...")
             count = 0
             try:
                 async for tweet in api.search(query, limit=self.limit):
@@ -170,39 +180,52 @@ class TweetDiscovery:
                         new_urls.append(url)
                         discovered.add(url)
                         count += 1
+                        
+                    if len(new_urls) >= self.total_limit:
+                        break # 中断内部循环
             except Exception as e:
                 logger.warning(f"   搜索出错: {e}")
                 continue
 
-            logger.info(f"   → 发现 {count} 条新推文")
+            logger.info(f"   → 发现 {count} 条新推文，当前共 {len(new_urls)} 条")
 
             # 每搜完一个 niche 随机等 15~35 秒，降低触发限速的概率
-            if idx < len(self.niches):
+            if idx < len(search_niches) and len(new_urls) < self.total_limit:
                 wait = random.uniform(15, 35)
                 logger.info(f"   ⏳ 冷却 {wait:.0f}s...")
                 await asyncio.sleep(wait)
 
         # 搜索白名单账号的最新推文
-        whitelist = self._load_whitelist_accounts()
-        if whitelist:
-            logger.info(f"📋 搜索 {len(whitelist)} 个白名单账号...")
-            for handle in whitelist:
-                query = f"from:{handle} filter:images"
-                logger.info(f"   白名单: @{handle}")
-                count = 0
-                try:
-                    async for tweet in api.search(query, limit=self.limit):
-                        url = f"https://x.com/{tweet.user.username}/status/{tweet.id}"
-                        if url not in discovered:
-                            new_urls.append(url)
-                            discovered.add(url)
-                            count += 1
-                except Exception as e:
-                    logger.warning(f"   搜索 @{handle} 出错: {e}")
-                    continue
-                logger.info(f"   → 发现 {count} 条新推文")
-                wait = random.uniform(10, 25)
-                await asyncio.sleep(wait)
+        if len(new_urls) < self.total_limit:
+            whitelist = self._load_whitelist_accounts()
+            if whitelist:
+                logger.info(f"📋 搜索 {len(whitelist)} 个白名单账号...")
+                for handle in whitelist:
+                    if len(new_urls) >= self.total_limit:
+                        logger.info(f"🛑 达到总获取上限 ({self.total_limit} 条)，结束白名单搜索。")
+                        break
+
+                    query = f"from:{handle} filter:images"
+                    logger.info(f"   白名单: @{handle}")
+                    count = 0
+                    try:
+                        async for tweet in api.search(query, limit=self.limit):
+                            url = f"https://x.com/{tweet.user.username}/status/{tweet.id}"
+                            if url not in discovered:
+                                new_urls.append(url)
+                                discovered.add(url)
+                                count += 1
+                                
+                            if len(new_urls) >= self.total_limit:
+                                break
+                    except Exception as e:
+                        logger.warning(f"   搜索 @{handle} 出错: {e}")
+                        continue
+                        
+                    logger.info(f"   → 发现 {count} 条新推文，当前共 {len(new_urls)} 条")
+                    if len(new_urls) < self.total_limit:
+                        wait = random.uniform(10, 25)
+                        await asyncio.sleep(wait)
 
         # 保存去重记录
         self._save_discovered(discovered)
