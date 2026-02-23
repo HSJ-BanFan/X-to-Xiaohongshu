@@ -238,7 +238,11 @@ class XiaohongshuPoster:
                     EC.presence_of_element_located((By.XPATH, "//textarea[contains(@class, 'd-text') or @placeholder='起个响亮的标题吧']"))
                 )
                 title_input.clear()
-                title_input.send_keys(title)
+                # 使用 JS 赋值避免 BMP 字符（如 emoji）导致 ChromeDriver 崩溃
+                self.driver.execute_script("""
+                    arguments[0].value = arguments[1];
+                    arguments[0].dispatchEvent(new Event('input', {bubbles: true}));
+                """, title_input, title)
             else:
                 self._fill_title(title)
         except Exception as e:
@@ -395,7 +399,11 @@ class XiaohongshuPoster:
 
             if title_input:
                 title_input.clear()
-                title_input.send_keys(title)
+                # 使用 JS 赋值避免 BMP 字符导致 ChromeDriver 崩溃
+                self.driver.execute_script("""
+                    arguments[0].value = arguments[1];
+                    arguments[0].dispatchEvent(new Event('input', {bubbles: true}));
+                """, title_input, title)
             else:
                 # 兜底：使用 JS 操作
                 self.driver.execute_script("""
