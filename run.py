@@ -6,7 +6,9 @@ X-to-XHS 启动入口
     python run.py https://x.com/user/status/1234567890
     python run.py --file urls.txt
     python run.py --scrape-only https://x.com/user/status/123
-    python run.py                   # 交互模式
+    python run.py --discover              # 自动发现推文
+    python run.py --auto                  # 全自动模式
+    python run.py                         # 交互模式
 """
 
 from src.pipeline import main

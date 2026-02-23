@@ -33,6 +33,7 @@ from config import (
     TRANSLATION_API,
     DEEPL_API_TOKEN,
     MEDIA_DIR,
+    AI_SCORING_ENABLED,
 )
 from .scraper import XScraper
 from .poster import XiaohongshuPoster
@@ -145,6 +146,16 @@ def process_single_tweet(
     logger.info(f"图片: {len(tweet_data.image_urls)} 张")
     logger.info(f"视频: {len(tweet_data.video_urls)} 个")
 
+    # AI 爆款评分（仅供参考，不过滤）
+    if AI_SCORING_ENABLED:
+        from .ai_generator import score_tweet_potential
+        media_count = len(tweet_data.image_urls) + len(tweet_data.video_urls)
+        score, reason = score_tweet_potential(tweet_data.text, media_count)
+        if score > 0:
+            logger.info(f"📊 AI 爆款评分: {score}/10 — {reason}")
+        else:
+            logger.info(f"📊 AI 评分跳过: {reason}")
+
     # 2. 下载媒体
     media_subdir = os.path.join(MEDIA_DIR, tweet_data.tweet_id)
     image_paths, video_paths = scraper.download_media(tweet_data, media_subdir)
@@ -254,8 +265,32 @@ def main():
     parser.add_argument("--scrape-only", "-s", action="store_true", help="仅抓取数据，不发布到小红书")
     parser.add_argument("--cookies", default=X_COOKIES_FILE, help="X cookies 文件路径")
     parser.add_argument("--no-resume", action="store_true", help="禁用断点续传，重新处理所有 URL")
+    parser.add_argument("--discover", action="store_true", help="自动发现推文并保存到 urls.txt（不抓取不发布）")
+    parser.add_argument("--auto", action="store_true", help="全自动模式: 定时发现 → 评分 → 抓取 → 发布")
 
     args = parser.parse_args()
+
+    # === 自动发现模式 ===
+    if args.discover:
+        from .discovery import TweetDiscovery
+        logger.info("🔍 自动发现模式：搜索推文并保存到 urls.txt")
+        discovery = TweetDiscovery()
+        urls = discovery.discover_sync()
+        if urls:
+            discovery.save_urls_to_file(urls)
+            logger.info(f"发现完成！共 {len(urls)} 条新推文，已保存到 urls.txt")
+            logger.info("下一步: python run.py --file urls.txt")
+        else:
+            logger.info("没有发现新推文")
+        return
+
+    # === 全自动模式 ===
+    if args.auto:
+        from .scheduler import AutoScheduler
+        logger.info("🤖 全自动模式启动")
+        scheduler = AutoScheduler()
+        scheduler.start()
+        return
 
     # 初始化目录和抓取器
     os.makedirs(MEDIA_DIR, exist_ok=True)
