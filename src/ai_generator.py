@@ -11,6 +11,49 @@ MAX_RETRIES = 3
 RETRY_DELAY = 5  # 秒
 
 
+def extract_topic_from_tweet(tweet_text: str) -> str:
+    """
+    从推文文本中提取核心主题关键词（2-5个词），
+    用于喂给 Grok 实时搜索做灵感扩展。
+
+    使用 LLM 提取；如果 LLM 不可用则截取前30字。
+    """
+    import re
+    # 清理链接
+    clean = re.sub(r'https?://\S+', '', tweet_text).strip()
+    if not clean:
+        return "生活分享"
+
+    if not LLM_API_KEY:
+        return clean[:30]
+
+    headers = {
+        "Authorization": f"Bearer {LLM_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": "你是关键词提取器，只输出2-5个中文关键词，用空格分隔，不要任何其他内容。"},
+            {"role": "user", "content": f"提取这段内容的核心主题关键词（适合小红书搜索的）：\n{clean[:500]}"},
+        ],
+        "temperature": 0.3,
+        "max_tokens": 30,
+    }
+
+    session = requests.Session()
+    session.trust_env = False
+    try:
+        resp = session.post(f"{LLM_BASE_URL}/chat/completions", headers=headers, json=payload, timeout=15)
+        resp.raise_for_status()
+        keywords = resp.json()["choices"][0]["message"]["content"].strip()
+        logger.info(f"🏷️ 提取主题关键词: {keywords}")
+        return keywords
+    except Exception as e:
+        logger.debug(f"关键词提取失败: {e}，使用原文截取")
+        return clean[:30]
+
+
 def generate_xhs_content(tweet_text: str, author_name: str) -> tuple[str, str]:
     """
     使用 LLM 根据推文原文生成小红书风格的标题和正文。

@@ -42,6 +42,8 @@ from config import (
     WHITELIST_ACCOUNTS_FILE,
     KB_AUTO_INGEST,
     KB_RETRIEVE_COUNT,
+    HYBRID_MODE_ENABLED,
+    GROK_API_KEY,
 )
 from .scraper import XScraper
 from .poster import XiaohongshuPoster
@@ -232,27 +234,70 @@ def process_single_tweet(
         text = translate_text(text)
         logger.info(f"翻译结果: {text[:100]}{'...' if len(text) > 100 else ''}")
 
-    # 5. 生成标题与正文 (AI 改写或提取首句)
+    # 5. 生成标题与正文
     from config import LLM_API_KEY
 
     has_text = bool(text and text.strip())
+    title = ""
+    content = ""
 
     if not has_text:
-        # 纯图片/视频推文，没有文字内容
-        logger.info("原推文无文本内容，使用简洁默认文案")
-        title = "分享"
-        content = f"via @{tweet_data.author}" if tweet_data.author else ""
+        # 纯图片/视频推文，没有文字内容 → 也可以走混合模式（Grok搜同类图片帖灵感）
+        if HYBRID_MODE_ENABLED and GROK_API_KEY:
+            logger.info("原推文无文本，使用混合模式根据媒体类型生成文案")
+            from .ai_generator import generate_hybrid_note
+            fallback_topic = "生活美学 日常分享"
+            title, content = generate_hybrid_note(fallback_topic)
+        if not title:
+            logger.info("原推文无文本内容，使用简洁默认文案")
+            title = "分享"
+            content = f"via @{tweet_data.author}" if tweet_data.author else ""
+
+    elif HYBRID_MODE_ENABLED and GROK_API_KEY:
+        # ===== 移花接木模式 =====
+        # 用推文的真实图片 + Grok 搜同类爆款生成全新原创文案
+        from .ai_generator import extract_topic_from_tweet, generate_hybrid_note
+
+        topic = extract_topic_from_tweet(text)
+        logger.info(f"🔄 移花接木模式：推文图片 + Grok 搜「{topic}」爆款灵感")
+
+        # 尝试从本地 KB 补充灵感
+        inspirations = None
+        try:
+            from .knowledge_base import KnowledgeBase
+            kb = KnowledgeBase()
+            if kb.stats().get("total_items", 0) > 0:
+                inspirations = kb.retrieve(topic, n_results=KB_RETRIEVE_COUNT)
+                if inspirations:
+                    logger.info(f"📚 本地 KB 补充 {len(inspirations)} 条灵感")
+        except Exception:
+            pass
+
+        ai_title, ai_content = generate_hybrid_note(topic, inspirations)
+        if ai_title and ai_content:
+            title = ai_title
+            content = ai_content
+        else:
+            # 混合模式失败，回退到旧的改写模式
+            logger.warning("混合模式失败，回退到 DeepSeek 改写")
+            from .ai_generator import generate_xhs_content
+            ai_title, ai_content = generate_xhs_content(text, tweet_data.author_name)
+            if ai_title and ai_content:
+                title = ai_title
+                content = ai_content
+
     elif LLM_API_KEY:
+        # 旧模式：DeepSeek 直接改写
         from .ai_generator import generate_xhs_content
         ai_title, ai_content = generate_xhs_content(text, tweet_data.author_name)
         if ai_title and ai_content:
             title = ai_title
             content = ai_content
-        else:
-            title = generate_xhs_title(text)
-            content = text
-    else:
+
+    # 兜底
+    if not title:
         title = generate_xhs_title(text)
+    if not content:
         content = text
 
     logger.info(f"小红书标题: {title}")
