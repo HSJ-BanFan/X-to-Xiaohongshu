@@ -62,6 +62,8 @@ from config import (
     DISCOVERY_NICHES,
     DISCOVERY_LIMIT_PER_NICHE,
     DISCOVERED_TWEETS_FILE,
+    WHITELIST_ACCOUNTS,
+    WHITELIST_ACCOUNTS_FILE,
 )
 
 logger = logging.getLogger(__name__)
@@ -79,6 +81,20 @@ class TweetDiscovery:
         self.niches = niches or DISCOVERY_NICHES
         self.limit = limit_per_niche or DISCOVERY_LIMIT_PER_NICHE
         self.discovered_file = DISCOVERED_TWEETS_FILE
+
+    def _load_whitelist_accounts(self) -> set[str]:
+        """加载白名单账号（配置列表 + 文件合并）"""
+        whitelist = {a.lower().lstrip("@") for a in WHITELIST_ACCOUNTS}
+        if os.path.exists(WHITELIST_ACCOUNTS_FILE):
+            try:
+                with open(WHITELIST_ACCOUNTS_FILE, "r", encoding="utf-8") as f:
+                    for line in f:
+                        handle = line.strip().lstrip("@")
+                        if handle and not handle.startswith("#"):
+                            whitelist.add(handle.lower())
+            except Exception:
+                pass
+        return whitelist
 
     def _load_discovered(self) -> set:
         """加载已发现的推文 URL 集合"""
@@ -164,6 +180,28 @@ class TweetDiscovery:
             if idx < len(self.niches):
                 wait = random.uniform(15, 35)
                 logger.info(f"   ⏳ 冷却 {wait:.0f}s...")
+                await asyncio.sleep(wait)
+
+        # 搜索白名单账号的最新推文
+        whitelist = self._load_whitelist_accounts()
+        if whitelist:
+            logger.info(f"📋 搜索 {len(whitelist)} 个白名单账号...")
+            for handle in whitelist:
+                query = f"from:{handle} filter:images"
+                logger.info(f"   白名单: @{handle}")
+                count = 0
+                try:
+                    async for tweet in api.search(query, limit=self.limit):
+                        url = f"https://x.com/{tweet.user.username}/status/{tweet.id}"
+                        if url not in discovered:
+                            new_urls.append(url)
+                            discovered.add(url)
+                            count += 1
+                except Exception as e:
+                    logger.warning(f"   搜索 @{handle} 出错: {e}")
+                    continue
+                logger.info(f"   → 发现 {count} 条新推文")
+                wait = random.uniform(10, 25)
                 await asyncio.sleep(wait)
 
         # 保存去重记录

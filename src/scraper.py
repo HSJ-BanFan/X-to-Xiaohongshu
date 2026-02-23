@@ -29,6 +29,9 @@ class TweetData:
     image_urls: list[str] = field(default_factory=list)
     video_urls: list[str] = field(default_factory=list)
     created_at: str = ""
+    favorite_count: int = 0
+    retweet_count: int = 0
+    reply_count: int = 0
     raw: dict = field(default_factory=dict, repr=False)
 
 
@@ -252,6 +255,9 @@ class XScraper:
             tweet_data.author = user_legacy.get("screen_name", "")
             tweet_data.author_name = user_legacy.get("name", "")
             tweet_data.created_at = legacy.get("created_at", "")
+            tweet_data.favorite_count = legacy.get("favorite_count", 0)
+            tweet_data.retweet_count = legacy.get("retweet_count", 0)
+            tweet_data.reply_count = legacy.get("reply_count", 0)
 
             # 提取媒体
             extended_media = legacy.get("extended_entities", {}).get("media", [])
@@ -292,6 +298,9 @@ class XScraper:
         tweet_data.tweet_id = str(data.get("id_str", ""))
         tweet_data.text = data.get("text", "")
         tweet_data.created_at = data.get("created_at", "")
+        tweet_data.favorite_count = data.get("favorite_count", 0)
+        tweet_data.retweet_count = data.get("retweet_count", 0)
+        tweet_data.reply_count = data.get("reply_count", 0)
 
         user = data.get("user", {})
         tweet_data.author = user.get("screen_name", "")

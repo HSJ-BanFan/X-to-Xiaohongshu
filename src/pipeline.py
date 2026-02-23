@@ -34,6 +34,14 @@ from config import (
     DEEPL_API_TOKEN,
     MEDIA_DIR,
     AI_SCORING_ENABLED,
+    QUALITY_FILTER_ENABLED,
+    MIN_FAVORITES,
+    MIN_RETWEETS,
+    REQUIRE_MEDIA,
+    WHITELIST_ACCOUNTS,
+    WHITELIST_ACCOUNTS_FILE,
+    KB_AUTO_INGEST,
+    KB_RETRIEVE_COUNT,
 )
 from .scraper import XScraper
 from .poster import XiaohongshuPoster
@@ -74,6 +82,21 @@ def _save_processed(urls: set):
     """保存已成功处理的 URL 集合"""
     with open(PROCESSED_FILE, "w", encoding="utf-8") as f:
         json.dump(sorted(urls), f, ensure_ascii=False, indent=2)
+
+
+def _load_whitelist() -> set[str]:
+    """加载白名单账号（配置列表 + 文件合并，统一小写）"""
+    whitelist = {a.lower().lstrip("@") for a in WHITELIST_ACCOUNTS}
+    if os.path.exists(WHITELIST_ACCOUNTS_FILE):
+        try:
+            with open(WHITELIST_ACCOUNTS_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    handle = line.strip().lstrip("@")
+                    if handle and not handle.startswith("#"):
+                        whitelist.add(handle.lower())
+        except Exception:
+            pass
+    return whitelist
 
 
 def translate_text(text: str, source_lang: str = "EN", target_lang: str = "ZH") -> str:
@@ -132,6 +155,7 @@ def process_single_tweet(
     scraper: XScraper,
     poster: XiaohongshuPoster = None,
     scrape_only: bool = False,
+    ingest_only: bool = False,
 ):
     """处理单条推文"""
     logger.info(f"{'='*60}")
@@ -145,6 +169,7 @@ def process_single_tweet(
     logger.info(f"正文: {tweet_data.text[:100]}{'...' if len(tweet_data.text) > 100 else ''}")
     logger.info(f"图片: {len(tweet_data.image_urls)} 张")
     logger.info(f"视频: {len(tweet_data.video_urls)} 个")
+    logger.info(f"❤️ {tweet_data.favorite_count}  🔁 {tweet_data.retweet_count}  💬 {tweet_data.reply_count}")
 
     # AI 爆款评分（仅供参考，不过滤）
     if AI_SCORING_ENABLED:
@@ -155,6 +180,36 @@ def process_single_tweet(
             logger.info(f"📊 AI 爆款评分: {score}/10 — {reason}")
         else:
             logger.info(f"📊 AI 评分跳过: {reason}")
+
+    # 质量过滤（白名单账号不受限制）
+    if QUALITY_FILTER_ENABLED:
+        whitelist = _load_whitelist()
+        is_whitelisted = tweet_data.author.lower() in whitelist
+        if not is_whitelisted:
+            if REQUIRE_MEDIA and not tweet_data.image_urls and not tweet_data.video_urls:
+                logger.info("⏭ 跳过: 无媒体内容")
+                return
+            if tweet_data.favorite_count < MIN_FAVORITES:
+                logger.info(f"⏭ 跳过: 点赞 {tweet_data.favorite_count} < {MIN_FAVORITES}")
+                return
+            if tweet_data.retweet_count < MIN_RETWEETS:
+                logger.info(f"⏭ 跳过: 转发 {tweet_data.retweet_count} < {MIN_RETWEETS}")
+                return
+        else:
+            logger.info("✅ 白名单账号，跳过质量过滤")
+
+    # 自动入库到知识库
+    if KB_AUTO_INGEST:
+        try:
+            from .knowledge_base import KnowledgeBase
+            kb = KnowledgeBase()
+            kb.add_tweet(tweet_data)
+        except Exception as e:
+            logger.debug(f"知识库入库跳过: {e}")
+
+    if ingest_only:
+        logger.info("仅入库模式，不继续处理")
+        return
 
     # 2. 下载媒体
     media_subdir = os.path.join(MEDIA_DIR, tweet_data.tweet_id)
@@ -249,14 +304,16 @@ def process_single_tweet(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="X-to-XHS: 从 X (Twitter) 搬运内容到小红书",
+        description="X-to-XHS: 从 X (Twitter) 内容到小红书原创笔记",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
   python run.py https://x.com/elonmusk/status/123456
   python run.py --file urls.txt
-  python run.py https://x.com/user/status/123 --scrape-only
-  python run.py --file urls.txt --no-resume
+  python run.py --scrape-only https://x.com/user/status/123
+  python run.py --ingest --file urls.txt       # 批量入库到知识库
+  python run.py --create "花生酱减脂早餐"         # 从知识库生成原创笔记
+  python run.py --kb-stats                      # 查看知识库状态
         """,
     )
 
@@ -267,8 +324,100 @@ def main():
     parser.add_argument("--no-resume", action="store_true", help="禁用断点续传，重新处理所有 URL")
     parser.add_argument("--discover", action="store_true", help="自动发现推文并保存到 urls.txt（不抓取不发布）")
     parser.add_argument("--auto", action="store_true", help="全自动模式: 定时发现 → 评分 → 抓取 → 发布")
+    parser.add_argument("--ingest", action="store_true", help="入库模式: 抓取推文并存入知识库（不发布）")
+    parser.add_argument("--create", metavar="TOPIC", help="原创模式: 从知识库生成原创笔记")
+    parser.add_argument("--style", default="生活化、温暖、接地气", help="原创笔记写作风格")
+    parser.add_argument("--kb-stats", action="store_true", help="查看知识库统计信息")
+    parser.add_argument(
+        "--hybrid", metavar="TOPIC",
+        help="混合模式: Grok 实时搜索 + 本地知识库 → 原创笔记（最强）",
+    )
 
     args = parser.parse_args()
+
+    # === 知识库统计 ===
+    if args.kb_stats:
+        from .knowledge_base import KnowledgeBase
+        kb = KnowledgeBase()
+        stats = kb.stats()
+        print(f"\n{'='*40}")
+        print(f"📚 知识库统计")
+        print(f"{'='*40}")
+        print(f"  总条目: {stats['total_items']}")
+        print(f"  数据库: {stats['db_path']}")
+        print(f"  嵌入模型: {stats['embedding_model']}")
+        if stats.get('top_authors'):
+            print(f"  作者数: {stats['unique_authors']}")
+            print(f"  Top 作者:")
+            for author, cnt in stats['top_authors']:
+                print(f"    @{author}: {cnt} 条")
+        return
+
+    # === 原创生成模式 ===
+    if args.create:
+        from .knowledge_base import KnowledgeBase
+        from .ai_generator import generate_original_note
+
+        kb = KnowledgeBase()
+        topic = args.create
+
+        logger.info(f"🎨 原创模式：主题「{topic}」，风格「{args.style}」")
+        inspirations = kb.retrieve(topic, n_results=KB_RETRIEVE_COUNT)
+
+        if not inspirations:
+            logger.error("知识库为空！请先用 --ingest --file urls.txt 入库推文")
+            return
+
+        title, content = generate_original_note(topic, inspirations, args.style)
+
+        if title and content:
+            print(f"\n{'='*50}")
+            print(f"📝 原创笔记")
+            print(f"{'='*50}")
+            print(f"标题: {title}")
+            print(f"\n{content}")
+            print(f"{'='*50}")
+            logger.info("提示: 去掉 --scrape-only 可直接发布到小红书")
+        else:
+            logger.error("原创生成失败")
+        return
+
+    # === 混合模式（Grok 实时 + 本地 KB）===
+    if args.hybrid:
+        from .ai_generator import generate_hybrid_note
+
+        topic = args.hybrid
+        logger.info(f"🔄 混合模式：主题「{topic}」，风格「{args.style}」")
+
+        # 尝试从本地 KB 获取灵感（可选, 没有也没关系）
+        inspirations = []
+        try:
+            from .knowledge_base import KnowledgeBase
+            kb = KnowledgeBase()
+            stats = kb.stats()
+            if stats.get("total_items", 0) > 0:
+                inspirations = kb.retrieve(topic, n_results=KB_RETRIEVE_COUNT)
+                logger.info(f"📚 本地知识库贡献 {len(inspirations)} 条灵感")
+            else:
+                logger.info("📚 本地知识库为空，仅使用 Grok 实时搜索")
+        except Exception as e:
+            logger.info(f"📚 知识库不可用（{e}），仅使用 Grok 实时搜索")
+
+        title, content = generate_hybrid_note(
+            topic, inspirations or None, args.style
+        )
+
+        if title and content:
+            print(f"\n{'='*50}")
+            print(f"📝 混合模式原创笔记")
+            print(f"{'='*50}")
+            print(f"标题: {title}")
+            print(f"\n{content}")
+            print(f"{'='*50}")
+            logger.info("提示: 后续可接入自动发布流程")
+        else:
+            logger.error("混合模式生成失败，请检查 GROK_API_KEY 配置")
+        return
 
     # === 自动发现模式 ===
     if args.discover:
@@ -338,7 +487,11 @@ def main():
             for idx, url in enumerate(urls, 1):
                 logger.info(f"[进度] {idx}/{len(urls)}")
                 try:
-                    process_single_tweet(url, scraper, poster, args.scrape_only)
+                    process_single_tweet(
+                        url, scraper, poster,
+                        scrape_only=args.scrape_only,
+                        ingest_only=getattr(args, 'ingest', False),
+                    )
                     processed_urls.add(url)
                     _save_processed(processed_urls)
                 except Exception as e:
