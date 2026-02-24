@@ -350,9 +350,39 @@ class XiaohongshuPoster:
         print(f"[小红书] 填写标题: {title}")
         try:
             # 兼容新版 UI：带有 .d-input 父级和 placeholder 的 input.d-text
-            title_input = self.page.locator(".d-input input.d-text, input[placeholder*='标题'], input.d-text").first
-            title_input.wait_for(timeout=5000)
-            title_input.fill(title)
+            selectors = [
+                ".d-input input.d-text",
+                "input[placeholder*='标题']",
+                "input.d-text",
+                ".title-input input",
+                "input[type='text'][maxlength='20']"
+            ]
+            title_input = None
+            for sel in selectors:
+                try:
+                    loc = self.page.locator(sel).first
+                    if loc.is_visible(timeout=2000):
+                        title_input = loc
+                        break
+                except Exception:
+                    continue
+
+            if title_input:
+                title_input.fill(title)
+            else:
+                print("[小红书] 警告: 未发现标准标题输入框可见，尝试使用 JS 强制输入...")
+                self.page.evaluate("""(t) => {
+                    const inputs = Array.from(document.querySelectorAll('input[type="text"], input'));
+                    const titleInput = inputs.find(i => 
+                        (i.placeholder && i.placeholder.includes('标题')) || 
+                        i.maxLength === 20 ||
+                        i.className.includes('title')
+                    );
+                    if (titleInput) {
+                        titleInput.value = t;
+                        titleInput.dispatchEvent(new Event('input', {bubbles: true}));
+                    }
+                }""", title)
         except Exception as e:
             print(f"[小红书] 标题填写失败: {e}")
             raise RuntimeError(f"标题填写失败，找不到标题输入框: {e}")
@@ -377,17 +407,42 @@ class XiaohongshuPoster:
             main_content = main_content.strip()
 
             # 兼容新版 UI：嵌套的富文本编辑器 .editor-content .tiptap.ProseMirror
-            editor = self.page.locator(".editor-content .ProseMirror, .ql-editor, #post-content .ql-editor, [contenteditable='true']").first
-            editor.wait_for(timeout=5000)
+            selectors = [
+                ".editor-content .ProseMirror",
+                ".ql-editor",
+                "#post-content .ql-editor",
+                "[contenteditable='true']"
+            ]
+            editor = None
+            for sel in selectors:
+                try:
+                    loc = self.page.locator(sel).first
+                    if loc.is_visible(timeout=2000):
+                        editor = loc
+                        break
+                except Exception:
+                    continue
 
-            # 聚焦并清空
-            editor.click()
-            self.page.keyboard.press("Control+A")
-            self.page.keyboard.press("Backspace")
-            
-            # 使用 Playwright 的 insert_text (安全且完美兼容各种 Emoji 和富文本排版)
-            self.page.keyboard.insert_text(main_content)
-            self.page.wait_for_timeout(1000)
+            if editor:
+                # 聚焦并清空
+                editor.click()
+                self.page.keyboard.press("Control+A")
+                self.page.keyboard.press("Backspace")
+                
+                # 使用 Playwright 的 insert_text (安全且完美兼容各种 Emoji 和富文本排版)
+                self.page.keyboard.insert_text(main_content)
+                self.page.wait_for_timeout(1000)
+            else:
+                print("[小红书] 警告: 未发现标准正文输入框可见，尝试使用 JS 强制聚焦输入...")
+                self.page.evaluate("""() => {
+                    const eds = document.querySelectorAll('[contenteditable="true"], .ProseMirror, .ql-editor');
+                    if (eds.length > 0) {
+                        eds[0].focus();
+                        eds[0].innerHTML = "";
+                    }
+                }""")
+                self.page.keyboard.insert_text(main_content)
+                self.page.wait_for_timeout(1000)
 
             # 输入话题
             if hashtags_to_type:
@@ -410,16 +465,40 @@ class XiaohongshuPoster:
         print("[小红书] 点击发布...")
         try:
             # 尝试几种常见的发布按钮定位
-            btn = self.page.locator("button:has-text('发布'), .publishBtn").first
-            if btn.is_visible():
-                btn.click()
-            else:
-                # 兜底：用 evaluate 强行点击
-                self.page.evaluate("""
-                    const btns = Array.from(document.querySelectorAll('button'));
-                    const publishBtn = btns.find(b => b.textContent.includes('发布'));
-                    if (publishBtn) publishBtn.click();
-                """)
+            selectors = [
+                "button:has-text('发布')", 
+                ".publishBtn", 
+                "button[class*='publish']",
+                ".submit",
+                "//button[contains(text(), '发布')]"
+            ]
+            
+            clicked = False
+            for sel in selectors:
+                try:
+                    btn = self.page.locator(sel).first
+                    if btn.is_visible(timeout=1000):
+                        btn.click()
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+                    
+            if not clicked:
+                # 兜底：用 evaluate 强行查找并点击
+                clicked = self.page.evaluate("""() => {
+                    const btns = Array.from(document.querySelectorAll('button, .d-button'));
+                    const publishBtn = btns.find(b => b.textContent && b.textContent.includes('发布'));
+                    if (publishBtn) {
+                        publishBtn.click();
+                        return true;
+                    }
+                    return false;
+                }""")
+            
+            if not clicked:
+                raise RuntimeError("未找到包含'发布'字样的按钮")
+                
         except Exception as e:
             print(f"[小红书] 点击发布按钮失败: {e}")
             raise RuntimeError(f"点击发布按钮失败: {e}")
