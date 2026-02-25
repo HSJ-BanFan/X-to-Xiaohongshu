@@ -282,10 +282,10 @@ def process_single_tweet(
 
     logger.info(f"小红书标题: {title}")
 
-    # 6. 添加来源标注（如果开启）
-    from config import ENABLE_AUTHOR_ATTRIBUTION
-    if ENABLE_AUTHOR_ATTRIBUTION and tweet_data.author and has_text:
-        content += f"\n\nvia @{tweet_data.author}"
+    # 6. 硬截断以防小红书发布报错（小红书上限 1000 字，这里截断至 950 字留余量）
+    if len(content) > 950:
+        logger.warning(f"AI 生成内容长度超限 ({len(content)} 字)，进行硬截断防报错")
+        content = content[:950]
 
     if scrape_only:
         logger.info("仅抓取模式，不发布到小红书")

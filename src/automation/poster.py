@@ -363,6 +363,25 @@ class XiaohongshuPoster:
             raise RuntimeError(f"点击下一步失败: {e}")
 
 
+    def _clean_and_move_hashtags(self, content: str) -> str:
+        """彻底清理正文里的所有 #标签，最后统一追加到末尾"""
+        # 提取所有标签（支持中文、英文、数字、各种后缀）
+        tags = re.findall(r'#[\w\u4e00-\u9fa5_]+', content)
+        
+        # 彻底移除正文里的所有标签（包括前后空格、标点）
+        clean_content = re.sub(r'\s*#[\w\u4e00-\u9fa5_]+\s*', ' ', content).strip()
+        clean_content = re.sub(r'\s+', ' ', clean_content)  # 合并多余空格
+        
+        # 去重 + 限制数量（小红书建议 ≤12 个）
+        unique_tags = list(dict.fromkeys(tags))[:12]
+        hashtag_str = " ".join(unique_tags)
+        
+        # 确保正文自然结尾
+        if clean_content and not clean_content.endswith(('。', '！', '？', '!', '?', '…')):
+            clean_content += "。"
+        
+        return f"{clean_content}\n\n{hashtag_str}"
+
     def _fill_title(self, title: str):
         """填写标题"""
         title = title[:20]
@@ -402,22 +421,13 @@ class XiaohongshuPoster:
 
     def _fill_content(self, content: str):
         """填写正文描述，提取标签并处理Emoji"""
+        # 新增：强制清理标签位置
+        content = self._clean_and_move_hashtags(content)
+        
         print(f"[小红书] 填写正文描述 ({len(content)} 字)...")
         try:
-            # 提取 hashtag
-            pattern = r'#([^\s#，。！？,。!?"\'\[\]]+)(?:\[话题\]#?)?'
-            matches = list(re.finditer(pattern, content))
-            
             main_content = content
-            hashtags_to_type = []
-            for m in matches:
-                full_match = m.group(0)
-                tag_name = m.group(1)
-                main_content = main_content.replace(full_match, '')
-                if tag_name not in hashtags_to_type:
-                    hashtags_to_type.append(tag_name)
-            
-            main_content = main_content.strip()
+            hashtags_to_type = []  # 标签已经在正文末尾，不再需要独立输入循环
 
             # 兼容新版 UI：嵌套的富文本编辑器 .editor-content .tiptap.ProseMirror
             selectors = [

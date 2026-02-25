@@ -19,7 +19,7 @@ import time
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 from config import (
-    SCHEDULER_INTERVAL_HOURS,
+    SCHEDULER_INTERVAL_MINUTES,
     SCHEDULER_MAX_POSTS_PER_RUN,
     BATCH_DELAY_MIN,
     BATCH_DELAY_MAX,
@@ -37,8 +37,8 @@ logger = logging.getLogger(__name__)
 class AutoScheduler:
     """全自动调度：发现 → 评分 → 抓取 → 发布"""
 
-    def __init__(self, interval_hours: int = None, max_posts: int = None):
-        self.interval = interval_hours or SCHEDULER_INTERVAL_HOURS
+    def __init__(self, interval_minutes: int = None, max_posts: int = None):
+        self.interval = interval_minutes or SCHEDULER_INTERVAL_MINUTES
         self.max_posts = max_posts or SCHEDULER_MAX_POSTS_PER_RUN
         self._scheduler = BlockingScheduler()
 
@@ -118,7 +118,7 @@ class AutoScheduler:
 
     def start(self):
         """启动调度器（阻塞运行）"""
-        logger.info(f"🚀 全自动模式启动！每 {self.interval} 小时运行一次")
+        logger.info(f"🚀 全自动模式启动！每 {self.interval} 分钟运行一次")
         logger.info(f"   每轮最多处理 {self.max_posts} 条推文")
         logger.info("   按 Ctrl+C 停止\n")
 
@@ -129,7 +129,7 @@ class AutoScheduler:
         self._scheduler.add_job(
             self._run_cycle,
             "interval",
-            hours=self.interval,
+            minutes=self.interval,
             id="auto_cycle",
             name="X-to-XHS 自动化周期",
         )

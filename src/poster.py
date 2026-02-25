@@ -265,9 +265,27 @@ class XiaohongshuPoster:
                 content_input.clear()
                 
                 # 为了防止表情导致 ChromeDriver 崩溃，或者大段文本输入慢，
-                # 我们可以用 JS 赋值 + send_keys 混合，或者过滤掉过于底层的字符
-                # 这里先将文本贴入
-                html_content = content.replace('\n', '<br>')
+                import re
+                from selenium.webdriver.common.keys import Keys
+                
+                # 提取所有的 hashtags，支持过滤标点和[话题]后缀
+                pattern = r'#([^\s#，。！？,。!?"\'\[\]]+)(?:\[话题\]#?)?'
+                matches = list(re.finditer(pattern, content))
+                
+                # 从主文本中剔除所有 hashtags，连带前面的可能空格一起剔除
+                main_content = re.sub(r'\s*' + pattern + r'\s*', ' ', content)
+                
+                # 剔除连续的多余空行
+                main_content = re.sub(r'\n{3,}', '\n\n', main_content).strip()
+
+                hashtags_to_type = []
+                for m in matches:
+                    tag_name = m.group(1)
+                    if tag_name not in hashtags_to_type:
+                        hashtags_to_type.append(tag_name)
+                
+                # 清空编辑器并用 JS 输入主内容
+                html_content = main_content.replace('\n', '<br>')
                 self.driver.execute_script("""
                     var editor = arguments[0];
                     var text = arguments[1];
@@ -281,18 +299,6 @@ class XiaohongshuPoster:
                 content_input.send_keys(" ")
                 time.sleep(0.5)
                 content_input.send_keys("\\b")
-                
-                # 触发一下 hashtags 处理
-                import re
-                from selenium.webdriver.common.keys import Keys
-                
-                pattern = r'#([^\s#，。！？,。!?"\'\[\]]+)(?:\[话题\]#?)?'
-                matches = list(re.finditer(pattern, content))
-                
-                hashtags_to_type = []
-                for m in matches:
-                    if m.group(1) not in hashtags_to_type:
-                        hashtags_to_type.append(m.group(1))
                         
                 if hashtags_to_type:
                      content_input.send_keys('\n\n')
@@ -451,16 +457,17 @@ class XiaohongshuPoster:
                 pattern = r'#([^\s#，。！？,。!?"\'\[\]]+)(?:\[话题\]#?)?'
                 matches = list(re.finditer(pattern, content))
                 
-                # 从主文本中剔除所有 hashtags
-                main_content = content
+                # 从主文本中剔除所有 hashtags，连带前面的可能空格一起剔除
+                main_content = re.sub(r'\s*' + pattern + r'\s*', ' ', content)
+                
+                # 剔除连续的多余空行（将 3 个以上的换行替换为 2 个）
+                main_content = re.sub(r'\n{3,}', '\n\n', main_content).strip()
+
                 hashtags_to_type = []
                 for m in matches:
-                    full_match = m.group(0)
                     tag_name = m.group(1)
-                    main_content = main_content.replace(full_match, '')
                     if tag_name not in hashtags_to_type:
                         hashtags_to_type.append(tag_name)
-                main_content = main_content.strip()
 
                 # 清空编辑器并用 JS 输入主内容，避免 ChromeDriver 的 BMP emoji 报错
                 html_content = main_content.replace('\n', '<br>')
