@@ -43,11 +43,13 @@ from config import (
     KB_AUTO_INGEST,
     KB_RETRIEVE_COUNT,
     HYBRID_MODE_ENABLED,
+    HYBRID_MODE_ENABLED,
     GROK_API_KEY,
+    ENABLE_TOPIC_POOL_LEARNING,
 )
-from .scraper import XScraper
-from .poster import XiaohongshuPoster
-from .utils import process_images_for_xhs
+from src.automation.scraper import XScraper
+from src.automation.poster import XiaohongshuPoster
+from src.utils.processor import process_images_for_xhs, translate_text
 
 # ==========================================
 # 日志配置
@@ -101,39 +103,6 @@ def _load_whitelist() -> set[str]:
     return whitelist
 
 
-def translate_text(text: str, source_lang: str = "EN", target_lang: str = "ZH") -> str:
-    """
-    翻译文本（可选功能）。
-
-    支持 Google Translate（免费）和 DeepL。
-    """
-    if not text.strip():
-        return text
-
-    if TRANSLATION_API == "deepl" and DEEPL_API_TOKEN:
-        try:
-            import deepl
-            translator = deepl.Translator(DEEPL_API_TOKEN)
-            result = translator.translate_text(
-                text,
-                source_lang=source_lang,
-                target_lang="ZH-HANS" if target_lang == "ZH" else target_lang,
-            )
-            return result.text
-        except Exception as e:
-            logger.warning(f"DeepL 翻译失败: {e}，回退到 Google Translate")
-
-    # Google Translate（免费方案，使用 googletrans 库）
-    try:
-        from googletrans import Translator
-        translator = Translator()
-        result = translator.translate(text, src="en", dest="zh-cn")
-        return result.text
-    except Exception as e:
-        logger.warning(f"Google 翻译也失败了: {e}")
-        return text
-
-
 def generate_xhs_title(text: str) -> str:
     """
     从推文正文中生成小红书标题（最多 20 字）。
@@ -175,7 +144,7 @@ def process_single_tweet(
 
     # AI 爆款评分（仅供参考，不过滤）
     if AI_SCORING_ENABLED:
-        from .ai_generator import score_tweet_potential
+        from src.ai.generator import score_tweet_potential
         media_count = len(tweet_data.image_urls) + len(tweet_data.video_urls)
         score, reason = score_tweet_potential(tweet_data.text, media_count)
         if score > 0:
@@ -203,7 +172,7 @@ def process_single_tweet(
     # 自动入库到知识库
     if KB_AUTO_INGEST:
         try:
-            from .knowledge_base import KnowledgeBase
+            from src.ai.knowledge_base import KnowledgeBase
             kb = KnowledgeBase()
             kb.add_tweet(tweet_data)
         except Exception as e:
@@ -212,6 +181,18 @@ def process_single_tweet(
     if ingest_only:
         logger.info("仅入库模式，不继续处理")
         return
+
+    # 提取并保存主题池
+    topic = ""
+    if has_text := bool(tweet_data.text and tweet_data.text.strip()):
+        from src.ai.generator import extract_topic_from_tweet
+        topic = extract_topic_from_tweet(tweet_data.text)
+        
+        if ENABLE_TOPIC_POOL_LEARNING and topic:
+            from src.core.topic_manager import TopicManager
+            tm = TopicManager()
+            if tm.add_topic(topic):
+                logger.info(f"💾 主题「{topic}」已收录到主题库")
 
     # 2. 下载媒体
     media_subdir = os.path.join(MEDIA_DIR, tweet_data.tweet_id)
@@ -245,7 +226,7 @@ def process_single_tweet(
         # 纯图片/视频推文，没有文字内容 → 也可以走混合模式（Grok搜同类图片帖灵感）
         if HYBRID_MODE_ENABLED and GROK_API_KEY:
             logger.info("原推文无文本，使用混合模式根据媒体类型生成文案")
-            from .ai_generator import generate_hybrid_note
+            from src.ai.generator import generate_hybrid_note
             fallback_topic = "生活美学 日常分享"
             title, content = generate_hybrid_note(fallback_topic)
         if not title:
@@ -256,15 +237,14 @@ def process_single_tweet(
     elif HYBRID_MODE_ENABLED and GROK_API_KEY:
         # ===== 移花接木模式 =====
         # 用推文的真实图片 + Grok 搜同类爆款生成全新原创文案
-        from .ai_generator import extract_topic_from_tweet, generate_hybrid_note
+        from src.ai.generator import generate_hybrid_note
 
-        topic = extract_topic_from_tweet(text)
         logger.info(f"🔄 移花接木模式：推文图片 + Grok 搜「{topic}」爆款灵感")
 
         # 尝试从本地 KB 补充灵感
         inspirations = None
         try:
-            from .knowledge_base import KnowledgeBase
+            from src.ai.knowledge_base import KnowledgeBase
             kb = KnowledgeBase()
             if kb.stats().get("total_items", 0) > 0:
                 inspirations = kb.retrieve(topic, n_results=KB_RETRIEVE_COUNT)
@@ -280,7 +260,7 @@ def process_single_tweet(
         else:
             # 混合模式失败，回退到旧的改写模式
             logger.warning("混合模式失败，回退到 DeepSeek 改写")
-            from .ai_generator import generate_xhs_content
+            from src.ai.generator import generate_xhs_content
             ai_title, ai_content = generate_xhs_content(text, tweet_data.author_name)
             if ai_title and ai_content:
                 title = ai_title
@@ -288,8 +268,8 @@ def process_single_tweet(
 
     elif LLM_API_KEY:
         # 旧模式：DeepSeek 直接改写
-        from .ai_generator import generate_xhs_content
-        ai_title, ai_content = generate_xhs_content(text, tweet_data.author_name)
+        from src.ai.generator import generate_xhs_content
+        ai_title, ai_content = generate_xhs_content(text, tweet_data.author_name, media_count=len(image_paths) + len(video_paths))
         if ai_title and ai_content:
             title = ai_title
             content = ai_content
@@ -359,6 +339,7 @@ def main():
   python run.py --ingest --file urls.txt       # 批量入库到知识库
   python run.py --create "花生酱减脂早餐"         # 从知识库生成原创笔记
   python run.py --kb-stats                      # 查看知识库状态
+  python run.py --random-hybrid                 # 从主题库随机抽取主题进行混合生成
         """,
     )
 
@@ -377,12 +358,13 @@ def main():
         "--hybrid", metavar="TOPIC",
         help="混合模式: Grok 实时搜索 + 本地知识库 → 原创笔记（最强）",
     )
+    parser.add_argument("--random-hybrid", action="store_true", help="随机混合模式: 从主题库随机抽取主题并生成图文")
 
     args = parser.parse_args()
 
     # === 知识库统计 ===
     if args.kb_stats:
-        from .knowledge_base import KnowledgeBase
+        from src.ai.knowledge_base import KnowledgeBase
         kb = KnowledgeBase()
         stats = kb.stats()
         print(f"\n{'='*40}")
@@ -396,12 +378,24 @@ def main():
             print(f"  Top 作者:")
             for author, cnt in stats['top_authors']:
                 print(f"    @{author}: {cnt} 条")
+        # === 主题库统计 ===
+        try:
+            from src.core.topic_manager import TopicManager
+            tm = TopicManager()
+            tm_stats = tm.get_stats()
+            print(f"\n{'='*40}")
+            print(f"🎯 主题库统计")
+            print(f"{'='*40}")
+            print(f"  已收录主题数: {tm_stats['total_topics']}")
+        except Exception as e:
+            print(f"无法加载主题库统计: {e}")
+            
         return
 
     # === 原创生成模式 ===
     if args.create:
-        from .knowledge_base import KnowledgeBase
-        from .ai_generator import generate_original_note
+        from src.ai.knowledge_base import KnowledgeBase
+        from src.ai.generator import generate_original_note
 
         kb = KnowledgeBase()
         topic = args.create
@@ -422,22 +416,45 @@ def main():
             print(f"标题: {title}")
             print(f"\n{content}")
             print(f"{'='*50}")
-            logger.info("提示: 去掉 --scrape-only 可直接发布到小红书")
+            if not args.scrape_only:
+                poster = XiaohongshuPoster(
+                    user_data_dir=CHROME_USER_DATA_DIR, profile_dir=CHROME_PROFILE
+                )
+                logger.info("准备发布原创笔记...")
+                poster.post_note(
+                    title=title,
+                    content=content,
+                    images=[],
+                    wait_before_publish=XHS_WAIT_BEFORE_PUBLISH,
+                )
+                logger.info("✓ 原创笔记发布成功！")
+            else:
+                logger.info("提示: 去掉 --scrape-only 可直接发布到小红书")
         else:
             logger.error("原创生成失败")
         return
 
     # === 混合模式（Grok 实时 + 本地 KB）===
-    if args.hybrid:
-        from .ai_generator import generate_hybrid_note
+    if args.hybrid or args.random_hybrid:
+        from src.ai.generator import generate_hybrid_note
 
-        topic = args.hybrid
+        if args.random_hybrid:
+            from src.core.topic_manager import TopicManager
+            tm = TopicManager()
+            topic = tm.get_random_topic()
+            if not topic:
+                logger.error("主题库为空！无法随机选择主题")
+                return
+            logger.info(f"🎲 随机抽取主题: 「{topic}」")
+        else:
+            topic = args.hybrid
+
         logger.info(f"🔄 混合模式：主题「{topic}」，风格「{args.style}」")
 
         # 尝试从本地 KB 获取灵感（可选, 没有也没关系）
         inspirations = []
         try:
-            from .knowledge_base import KnowledgeBase
+            from src.ai.knowledge_base import KnowledgeBase
             kb = KnowledgeBase()
             stats = kb.stats()
             if stats.get("total_items", 0) > 0:
@@ -459,14 +476,27 @@ def main():
             print(f"标题: {title}")
             print(f"\n{content}")
             print(f"{'='*50}")
-            logger.info("提示: 后续可接入自动发布流程")
+            if not args.scrape_only:
+                poster = XiaohongshuPoster(
+                    user_data_dir=CHROME_USER_DATA_DIR, profile_dir=CHROME_PROFILE
+                )
+                logger.info("准备发布混合模式笔记...")
+                poster.post_note(
+                    title=title,
+                    content=content,
+                    images=[],
+                    wait_before_publish=XHS_WAIT_BEFORE_PUBLISH,
+                )
+                logger.info("✓ 混合模式发布成功！")
+            else:
+                logger.info("提示: 去掉 --scrape-only 即可自动发布到小红书")
         else:
             logger.error("混合模式生成失败，请检查 GROK_API_KEY 配置")
         return
 
     # === 自动发现模式 ===
     if args.discover:
-        from .discovery import TweetDiscovery
+        from src.core.discovery import TweetDiscovery
         logger.info("🔍 自动发现模式：搜索推文并保存到 urls.txt")
         discovery = TweetDiscovery()
         urls = discovery.discover_sync()
@@ -480,7 +510,7 @@ def main():
 
     # === 全自动模式 ===
     if args.auto:
-        from .scheduler import AutoScheduler
+        from src.core.scheduler import AutoScheduler
         logger.info("🤖 全自动模式启动")
         scheduler = AutoScheduler()
         scheduler.start()

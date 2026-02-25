@@ -199,14 +199,24 @@ class XiaohongshuPoster:
         elif images:
             print("[小红书] 切换到 图文 发布模式...")
             try:
-                # 首先尝试精准匹配，然后更宽泛匹配
-                tab = self.page.locator("text='图文'").first
-                if not tab.is_visible(timeout=3000):
-                    tab = self.page.locator(".tab-item:has-text('图文')").first
-                if tab.is_visible():
-                    tab.click()
-                elif use_long_article == False:
-                     print("[小红书] 警告: 未找到独立的图文Tab，假设当前已在图文发布页")
+                # 尝试更精确的 JS 强制点击和更宽泛的匹配
+                clicked = self.page.evaluate("""() => {
+                    const els = Array.from(document.querySelectorAll('*'));
+                    const target = els.find(el => el.textContent && el.textContent.trim() === '上传图文');
+                    if (target) {
+                        target.click();
+                        return true;
+                    }
+                    return false;
+                }""")
+                if not clicked:
+                    tab = self.page.locator("text='上传图文'").first
+                    if not tab.is_visible(timeout=3000):
+                        tab = self.page.locator(".tab-item", has_text=re.compile(r"图文|笔记")).first
+                    if tab.is_visible():
+                        tab.click()
+                    elif use_long_article == False:
+                         print("[小红书] 警告: 未找到独立的图文Tab，假设当前已在图文发布页")
                 self.page.wait_for_timeout(2000)
             except Exception as e:
                 print(f"[小红书] 切换图文 Tab 失败: {e}")
@@ -256,7 +266,12 @@ class XiaohongshuPoster:
             file_input.evaluate("el => el.setAttribute('multiple', 'multiple')")
             file_input.set_input_files(abs_paths)
             print("[小红书] 图片已上传，等待处理...")
-            self.page.wait_for_timeout(5000)
+            # 显示等待上传状态，避免硬超时导致流程中断
+            try:
+                self.page.wait_for_selector(".image-item, .d-image-item, text='继续添加', text='重新上传'", timeout=15000, state="visible")
+            except Exception:
+                pass
+            self.page.wait_for_timeout(3000)
         except Exception as e:
             print(f"[小红书] 图片上传失败: {e}")
             raise RuntimeError(f"图片上传失败: {e}")
@@ -269,7 +284,11 @@ class XiaohongshuPoster:
             file_input = self.page.locator("input[type='file']").first
             file_input.set_input_files(abs_path)
             print("[小红书] 视频已上传，等待处理（可能需要较长时间）...")
-            self.page.wait_for_timeout(15000)
+            try:
+                self.page.wait_for_selector("text='重新上传'", timeout=60000, state="visible")
+            except Exception:
+                pass
+            self.page.wait_for_timeout(5000)
         except Exception as e:
             print(f"[小红书] 视频上传失败: {e}")
             raise RuntimeError(f"视频上传失败: {e}")
@@ -349,25 +368,19 @@ class XiaohongshuPoster:
         title = title[:20]
         print(f"[小红书] 填写标题: {title}")
         try:
-            # 兼容新版 UI：带有 .d-input 父级和 placeholder 的 input.d-text
-            selectors = [
-                ".d-input input.d-text",
-                "input[placeholder*='标题']",
-                "input.d-text",
-                ".title-input input",
-                "input[type='text'][maxlength='20']"
-            ]
-            title_input = None
-            for sel in selectors:
-                try:
-                    loc = self.page.locator(sel).first
-                    if loc.is_visible(timeout=2000):
-                        title_input = loc
-                        break
-                except Exception:
-                    continue
+            print("[小红书] 等待编辑器加载...")
+            try:
+                # 动态等待编辑器宣染（最长60秒，适配慢速网络上传大文件的情况）
+                self.page.wait_for_selector("[placeholder*='标题']", timeout=60000, state="visible")
+            except Exception:
+                pass
 
-            if title_input:
+            title_input = self.page.locator("[placeholder*='标题']").first
+            if not title_input.is_visible(timeout=2000):
+                # 备用选择器
+                title_input = self.page.locator("input.d-text, input[type='text'][maxlength='20']").first
+
+            if title_input.is_visible(timeout=2000):
                 title_input.fill(title)
             else:
                 print("[小红书] 警告: 未发现标准标题输入框可见，尝试使用 JS 强制输入...")
@@ -408,16 +421,16 @@ class XiaohongshuPoster:
 
             # 兼容新版 UI：嵌套的富文本编辑器 .editor-content .tiptap.ProseMirror
             selectors = [
+                "[placeholder*='正文']",
+                "[contenteditable='true']",
                 ".editor-content .ProseMirror",
-                ".ql-editor",
-                "#post-content .ql-editor",
-                "[contenteditable='true']"
+                ".ql-editor"
             ]
             editor = None
             for sel in selectors:
                 try:
                     loc = self.page.locator(sel).first
-                    if loc.is_visible(timeout=2000):
+                    if loc.is_visible(timeout=1000):
                         editor = loc
                         break
                 except Exception:
@@ -431,6 +444,7 @@ class XiaohongshuPoster:
                 
                 # 使用 Playwright 的 insert_text (安全且完美兼容各种 Emoji 和富文本排版)
                 self.page.keyboard.insert_text(main_content)
+                self.page.evaluate("() => { if (document.activeElement) document.activeElement.dispatchEvent(new Event('input', {bubbles: true})); }")
                 self.page.wait_for_timeout(1000)
             else:
                 print("[小红书] 警告: 未发现标准正文输入框可见，尝试使用 JS 强制聚焦输入...")
@@ -442,6 +456,7 @@ class XiaohongshuPoster:
                     }
                 }""")
                 self.page.keyboard.insert_text(main_content)
+                self.page.evaluate("() => { if (document.activeElement) document.activeElement.dispatchEvent(new Event('input', {bubbles: true})); }")
                 self.page.wait_for_timeout(1000)
 
             # 输入话题
@@ -464,8 +479,16 @@ class XiaohongshuPoster:
         """点击发布按钮"""
         print("[小红书] 点击发布...")
         try:
-            # 尝试几种常见的发布按钮定位
+            # 最新版小红书发布按钮定位（找到最后一个文字为发布或发布笔记的元素）
+            pb = self.page.locator("text='发布'").last
+            if pb.is_visible(timeout=2000):
+                pb.click()
+                return
+
             selectors = [
+                "button:has-text('发布笔记')",
+                "button:has-text('发布图文')",
+                "button:has-text('发布视频')",
                 "button:has-text('发布')", 
                 ".publishBtn", 
                 "button[class*='publish']",

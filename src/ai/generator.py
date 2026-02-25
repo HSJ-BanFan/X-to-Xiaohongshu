@@ -54,7 +54,53 @@ def extract_topic_from_tweet(tweet_text: str) -> str:
         return clean[:30]
 
 
-def generate_xhs_content(tweet_text: str, author_name: str) -> tuple[str, str]:
+def classify_content(tweet_text: str, media_count: int) -> str:
+    """
+    判断内容类型以选择对应的小红书模版。
+    """
+    if not LLM_API_KEY:
+        return "DEFAULT"
+
+    from src.ai.prompts import get_classification_prompt
+    prompt = get_classification_prompt(tweet_text, media_count)
+
+    headers = {
+        "Authorization": f"Bearer {LLM_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": "You are a JSON-only content classifier."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.3,
+        "response_format": {"type": "json_object"}
+    }
+
+    session = requests.Session()
+    session.trust_env = False
+    try:
+        resp = session.post(f"{LLM_BASE_URL}/chat/completions", headers=headers, json=payload, timeout=20)
+        resp.raise_for_status()
+        
+        reply_text = resp.json()["choices"][0]["message"]["content"].strip()
+        data = json.loads(reply_text)
+        category = data.get("category", "DEFAULT").upper()
+        
+        # 兼容性检查
+        valid_categories = ["TUTORIAL", "REVIEW", "LIFESTYLE", "NEWS", "DEFAULT"]
+        if category not in valid_categories:
+            category = "DEFAULT"
+            
+        logger.info(f"🧠 内容类型识别为: {category}")
+        return category
+    except Exception as e:
+        logger.warning(f"内容分类失败: {e}，回退到 DEFAULT 模板")
+        return "DEFAULT"
+
+
+def generate_xhs_content(tweet_text: str, author_name: str, media_count: int = 0) -> tuple[str, str]:
     """
     使用 LLM 根据推文原文生成小红书风格的标题和正文。
     返回: (title, content)
@@ -65,43 +111,20 @@ def generate_xhs_content(tweet_text: str, author_name: str) -> tuple[str, str]:
 
     logger.info(f"正在调用 {LLM_MODEL} 生成小红书文案...")
 
-    prompt = f"""
-    你是小红书资深文案写手。把以下素材改写成一篇原生风格的小红书图文笔记，让读者觉得这就是你自己的原创内容。
-
-    素材（来自 {author_name}）：
-    \"\"\"
-    {tweet_text}
-    \"\"\"
-
-    铁律（违反任何一条即为失败）：
-    1. 🚫【绝对禁止暴露来源】：正文中禁止出现"推文"、"原推"、"Twitter"、"X 平台"、"搬运"、"转载"、"翻译"、"原文是"等任何暗示内容并非原创的词汇。必须以第一人称写作，把内容当成自己的发现/经历来分享。
-    2. 🚫【禁止套话】：禁止使用"姐妹们"、"家人们"、"宝子们"、"小仙女"等套话。
-    3. 🚫【绝对禁止 Markdown】：绝不要使用 `**`、`#`、`-`、`*` 等 Markdown 语法。小红书不支持这些！请用回车换行和 Emoji（如 📌、💡、✅）来进行视觉排版。
-    4. 🚫【字数限制】：正文字数必须严格控制在 800 字以内，绝对不要超过小红书 1000 字的上限！
-    5. 如果素材文字很少甚至只有一两个词，就围绕配图可能的主题写一段简短走心的分享即可，不要硬凑字数。
-    6. 如果素材包含 http/https 链接，必须原样保留在正文中。
-    7. 分段清晰，适度使用 Emoji。
-    8. 结尾加一句互动引导。
-    9. 结尾加 3-5 个 #话题标签（纯文字，格式如：#宠物 #日常）。
-
-    【标题】：20字以内，有吸引力。
-    【输出格式】：纯 JSON，不要 markdown 代码块：
-    {{
-        "title": "标题",
-        "content": "正文"
-    }}
-    """
-
-    headers = {
-        "Authorization": f"Bearer {LLM_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    # 先做内容分类
+    content_type = classify_content(tweet_text, media_count)
+    
+    # 获取具体的生成 Prompt
+    from src.ai.prompts import get_generation_prompt, get_json_structure_instruction
+    base_prompt = get_generation_prompt(content_type, tweet_text)
+    json_instruction = get_json_structure_instruction()
+    full_prompt = base_prompt + "\n\n" + json_instruction
 
     payload = {
         "model": LLM_MODEL,
         "messages": [
-            {"role": "system", "content": "你是一个输出纯 JSON 的 API 服务器。不要输出任何多余的开头和结尾说明，不要使用 Markdown 代码块。"},
-            {"role": "user", "content": prompt}
+            {"role": "system", "content": "你是一个输出纯 JSON 的 API 服务器。不要输出任何多余说明，不要加Markdown。"},
+            {"role": "user", "content": full_prompt}
         ],
         "temperature": 0.85,
         "response_format": {"type": "json_object"}
@@ -248,32 +271,32 @@ def generate_original_note(
 
     context = "\n\n".join(context_parts)
 
-    prompt = f"""你是一位专业的小红书生活博主，写作风格：{style}。
-用户想发一篇主题为「{topic}」的笔记。
+    # --- 内容分类与加载模板 ---
+    content_type = classify_content(topic, 0)
+    from src.ai.prompts import get_generation_prompt, get_json_structure_instruction
+    
+    base_prompt = get_generation_prompt(content_type, "（无基础素材，请参考下方灵感重写）")
+    json_instruction = get_json_structure_instruction()
 
-以下是从网络公开分享中检索到的 {len(inspirations)} 条相关灵感素材（仅供参考，严禁直接翻译或复制！）：
+    prompt = f"""小红书原创模式写作指令：
+
+目前用户给定写作主题: 「{topic}」
+所选输出排版风格: {content_type}
+要求的特定写作基调: {style}
+
+以下是从公开网络分享中检索到的 {len(inspirations)} 条相关灵感素材（仅供参考，严禁直接翻译或复制！）：
 ---
 {context}
 ---
 
-请基于以上灵感，创作一篇**完全原创**的小红书笔记：
+请严格基于以上灵感和主题要求，创作一篇**完全原创**的小红书笔记。
 
-铁律（违反任何一条即为失败）：
-1. 🚫 必须100%原创，不得翻译、搬运、复制任何灵感素材的原文。你只是从中获取"灵感"和"思路"。
-2. 必须以第一人称写作，把内容当成自己的真实经历/体验来分享。
-3. 🚫 禁止出现"推文""Twitter""X平台""搬运""转载""翻译""国外博主"等暗示内容来源的词汇。
-4. 🚫 禁止使用"姐妹们""家人们""宝子们""小仙女"等套话。
-5. 🚫 绝对禁止 Markdown 语法（如 `**加粗**`、`# 大标题`、`- 列表` 等）。小红书无法识别，请只使用空行和 Emoji 排版！
-6. 标题：30字以内，有吸引力的爆款钩子。
-7. 正文结构：痛点/场景引入 → 详细干货/过程 → 个人心得 → 互动引导。
-8. 正文 300-800 字，分段清晰，适度 Emoji，坚决不能超过 1000 字！
-9. 结尾加 3-5 个 #话题标签。
+【排版与核心禁忌要求】（来自系统配置）：
+{base_prompt}
+（注意：必须遵循 {style} 的语气。）
 
-【输出格式】纯 JSON，不要 markdown 代码块：
-{{
-    "title": "标题",
-    "content": "正文（含话题标签）"
-}}"""
+{json_instruction}
+"""
 
     headers = {
         "Authorization": f"Bearer {LLM_API_KEY}",
@@ -370,45 +393,46 @@ def generate_hybrid_note(
         return "", ""
 
     # --- 构建本地灵感上下文 ---
-    local_context = ""
+    local_section = ""
     if inspirations:
         parts = []
         for i, insp in enumerate(inspirations, 1):
-            text = insp.get("text", "")[:300]
+            t = insp.get("text", "")[:300]
             likes = insp.get("favorite_count", 0)
-            parts.append(f"本地灵感{i}（❤️{likes}）:\n{text}")
+            parts.append(f"本地灵感{i}（❤️{likes}）:\n{t}")
         local_context = "\n\n".join(parts)
-
-    # --- 构建 Prompt ---
-    local_section = ""
-    if local_context:
         local_section = f"""
-以下是从本地灵感库中检索到的 {len(inspirations)} 条相关素材（仅供参考，严禁复制！）：
+以下是由本地知识库检索到的 {len(inspirations)} 条相关素材（仅供参考，严禁直接复制或翻译）：
 ---
 {local_context}
 ---
 """
 
-    prompt = f"""你是顶级小红书生活博主，写作风格：{style}（温暖接地气、多emoji、实用干货、第一人称、300-800字）。
+    # --- 内容分类与加载模板 ---
+    content_type = classify_content(topic, 0)
+    from src.ai.prompts import get_generation_prompt, get_json_structure_instruction
+    
+    # 获取特定排版基底
+    base_prompt = get_generation_prompt(content_type, "（无基础素材，请你实时搜索补充）")
+    json_instruction = get_json_structure_instruction()
 
-用户主题：{topic}
+    # --- 构建最终 Prompt ---
+    full_prompt = f"""小红书混合模式写作指令：
+
+目前用户给定写作主题: 「{topic}」
+所选输出排版风格: {content_type}
+
 {local_section}
-请你：
-1. 先搜索 X/Twitter 上 6-8 条最新高质量相关帖子（要求：高赞、最近7天、英文/中文均可）
-2. 结合搜索结果和上面的本地灵感（如有），创作一篇**100%原创**小红书笔记
-3. 绝对不能直接复制/翻译任何素材原文，只从中获取灵感和思路
 
-铁律：
-- 🚫 禁止出现"推文""Twitter""X平台""搬运""转载""翻译""国外博主"
-- 🚫 禁止"姐妹们""家人们""宝子们""小仙女"
-- 🚫 绝对禁止 Markdown 语法（如 `**`、`#`）。使用自带 Emoji 和空行排版。
-- 必须第一人称，当成自己的真实经历分享
-- 标题30字以内，有吸引力
-- 正文300-800字，坚决不能超过 1000 字限制，分段清晰，适度Emoji
-- 结尾互动引导 + 3-5个 #话题标签
+【操作步骤】：
+1. 请先根据主题「{topic}」搜索 X/Twitter 上的 6-8 条最新高质量相关帖子（要求：高赞、时间近、英文/中文均可）。
+2. 然后结合所搜索出的素材，以及可能的以上本地素材，严格按照下方的【排版与禁忌要求】，创作一篇**完全原创**的小红书图文笔记。
 
-【输出格式】纯 JSON，不要 markdown 代码块：
-{{"title": "标题", "content": "正文（含话题标签）"}}"""
+【排版与禁忌要求】（来自系统配置）：
+{base_prompt}
+
+{json_instruction}
+"""
 
     headers = {
         "Authorization": f"Bearer {GROK_API_KEY}",
@@ -421,12 +445,11 @@ def generate_hybrid_note(
             {
                 "role": "system",
                 "content": (
-                    "你是专业小红书创作者助手，输出纯 JSON。"
-                    "你可以使用搜索工具获取最新 X/Twitter 帖子作为灵感。"
-                    "不要输出任何多余说明，不要使用 Markdown 代码块。"
+                    "你是一个输出纯 JSON 的高级内容生成与搜索代理。"
+                    "请使用搜索工具获取最新 X/Twitter 帖子作为灵感，然后严格按照用户要求的 JSON 格式输出结果。"
                 ),
             },
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": full_prompt},
         ],
         "temperature": 0.9,
         "search_parameters": {
