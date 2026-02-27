@@ -179,6 +179,13 @@ class XiaohongshuPoster:
             self.login()
 
         print("[小红书] 开始发布笔记...")
+        
+        # 确保 page 仍然存活
+        if self.page.is_closed():
+            print("[小红书] 警告: Page 已关闭，正在重新创建...")
+            self.page = self.context.new_page()
+            self.page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
         self.page.goto(self.PUBLISH_URL)
         self.page.wait_for_timeout(3000)
 
@@ -315,13 +322,18 @@ class XiaohongshuPoster:
             title_input = self.page.locator("[placeholder*='标题']").first
             if title_input.is_visible():
                 title_input.fill(title)
+
+            # --- 对长文正文进行彻底的标签净化，图片里不需要显示任何带 # 的字符 ---
+            clean_long_content = re.sub(r'[ \t]*#[\w\u4e00-\u9fa5_]+[ \t]*', '', content).strip()
+            clean_long_content = re.sub(r'[ \t]+', ' ', clean_long_content)  
+            clean_long_content = re.sub(r'\n{3,}', '\n\n', clean_long_content)
                 
             # 2. 填写正文
             editor = self.page.locator(".ProseMirror, [data-placeholder='粘贴到这里或输入文字']").first
             editor.click()
             self.page.keyboard.press("Control+A")
             self.page.keyboard.press("Backspace")
-            self.page.keyboard.insert_text(content)
+            self.page.keyboard.insert_text(clean_long_content)
             self.page.wait_for_timeout(1000)
         except Exception as e:
             print(f"[小红书] 填写长文编辑器失败: {e}")
@@ -367,25 +379,26 @@ class XiaohongshuPoster:
         """彻底清理正文里的所有 #标签，最后统一追加到末尾"""
         # 提取所有标签（支持中文、英文、数字、各种后缀）
         tags = re.findall(r'#[\w\u4e00-\u9fa5_]+', content)
-        
-        # 彻底移除正文里的所有标签（包括前后空格、标点）
-        clean_content = re.sub(r'[ \t]*#[\w\u4e00-\u9fa5_]+[ \t]*', ' ', content).strip()
+
+        # 彻底移除正文里的所有标签（保留原本前后的自然连贯，并且处理可能因标签独立成行造成的空行断层）
+        clean_content = re.sub(r'\s*#[\w\u4e00-\u9fa5_]+\s*', '', content).strip()
         clean_content = re.sub(r'[ \t]+', ' ', clean_content)  # 只合并同行多余空格，绝不碰 \n
         clean_content = re.sub(r'\n{3,}', '\n\n', clean_content) # 超过两行的连续回车压缩为最多两行
         
         # 去重 + 限制数量（小红书建议 ≤12 个）
         unique_tags = list(dict.fromkeys(tags))[:12]
-        hashtag_str = " ".join(unique_tags)
+        # 注意：此处用带空格的前缀组装，以配合 Playwright 纯文本插入时触发小红书变色！
+        hashtag_str = " ".join([tag if tag.startswith('#') else f"#{tag}" for tag in unique_tags])
         
         # 确保正文自然结尾
         if clean_content and not clean_content.endswith(('。', '！', '？', '!', '?', '…')):
             clean_content += "。"
         
+        # 强制增加两行回车，以保证 hashtag_str 总是稳稳挂在最后一行
         return f"{clean_content}\n\n{hashtag_str}"
 
     def _fill_title(self, title: str):
         """填写标题"""
-        title = title[:20]
         print(f"[小红书] 填写标题: {title}")
         try:
             print("[小红书] 等待编辑器加载...")
@@ -421,10 +434,7 @@ class XiaohongshuPoster:
             raise RuntimeError(f"标题填写失败，找不到标题输入框: {e}")
 
     def _fill_content(self, content: str):
-        """填写正文描述，提取标签并处理Emoji"""
-        # Extract hashtags before cleaning
-        hashtags_to_type = re.findall(r"#([\w一-龥_]+)", content)[:5]
-        
+        """填写正文描述"""
         # Clean and move hashtags to end
         content = self._clean_and_move_hashtags(content)
         
@@ -454,13 +464,17 @@ class XiaohongshuPoster:
                 editor.click()
                 self.page.keyboard.press("Control+A")
                 self.page.keyboard.press("Backspace")
+                self.page.wait_for_timeout(500)
                 
-                # 使用 Playwright 的 insert_text (安全且完美兼容各种 Emoji 和富文本排版)
-                self.page.keyboard.insert_text(main_content)
-                self.page.evaluate("() => { if (document.activeElement) document.activeElement.dispatchEvent(new Event('input', {bubbles: true})); }")
+                # 方案：使用剪贴板粘贴。这能最好地触发富文本编辑器的格式化机制保留换行
+                self.page.evaluate("async (text) => await navigator.clipboard.writeText(text)", main_content)
+                self.page.keyboard.press("Control+V")
+                
                 self.page.wait_for_timeout(1000)
             else:
-                print("[小红书] 警告: 未发现标准正文输入框可见，尝试使用 JS 强制聚焦输入...")
+                print("[小红书] 警告: 未发现标准正文输入框可见，尝试使用兜底策略...")
+                # 兜底：尝试全量填充或者使用 fallback 的 selector
+                self.page.evaluate("async (text) => await navigator.clipboard.writeText(text)", main_content)
                 self.page.evaluate("""() => {
                     const eds = document.querySelectorAll('[contenteditable="true"], .ProseMirror, .ql-editor');
                     if (eds.length > 0) {
@@ -468,21 +482,8 @@ class XiaohongshuPoster:
                         eds[0].innerHTML = "";
                     }
                 }""")
-                self.page.keyboard.insert_text(main_content)
-                self.page.evaluate("() => { if (document.activeElement) document.activeElement.dispatchEvent(new Event('input', {bubbles: true})); }")
+                self.page.keyboard.press("Control+V")
                 self.page.wait_for_timeout(1000)
-
-            # 输入话题
-            if hashtags_to_type:
-                self.page.keyboard.press("Enter")
-                self.page.keyboard.press("Enter")
-                for tag in hashtags_to_type:
-                    # 键入 # 和标签名字
-                    self.page.keyboard.insert_text(f"#{tag}")
-                    self.page.wait_for_timeout(1500)  # 等待小红书的联想弹窗加载
-                    self.page.keyboard.press("Enter")
-                    self.page.wait_for_timeout(500)
-                    self.page.keyboard.insert_text(" ")
 
         except Exception as e:
             print(f"[小红书] 正文填写失败: {e}")

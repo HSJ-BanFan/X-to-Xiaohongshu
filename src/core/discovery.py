@@ -205,7 +205,8 @@ class TweetDiscovery:
                         logger.info(f"🛑 达到总获取上限 ({self.total_limit} 条)，结束白名单搜索。")
                         break
 
-                    query = f"from:{handle} filter:images"
+                    query = f"from:{handle}"
+
                     logger.info(f"   白名单: @{handle}")
                     count = 0
                     try:
