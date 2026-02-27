@@ -545,22 +545,79 @@ class XiaohongshuPoster:
         print(f"[小红书] 尝试选取推荐标签（最多 {max_tags} 个）...")
         self.page.wait_for_timeout(3000)
         try:
-            # 找到底下可能包含 # 开头的标签元素
-            tags_loc = self.page.locator(".tag-item, .topic-item, [class*='tag'], [class*='topic'], [class*='hashtag']")
-            count = tags_loc.count()
+            # 尝试多种选择器精确定位单个标签
+            selectors = [
+                ".tag-item .name",  # 常见结构：标签项内的名称
+                ".topic-item .name",
+                ".tag-item span",
+                ".topic-item span",
+                ".tag:has-text(#)",
+                ".topic:has-text(#)",
+            ]
+
             selected = 0
-            
-            for i in range(count):
+            selected_texts = set()  # 避免重复选择
+
+            for sel in selectors:
                 if selected >= max_tags:
                     break
-                loc = tags_loc.nth(i)
-                text = loc.text_content() or ""
-                if text.strip().startswith("#"):
-                    loc.click()
-                    selected += 1
-                    print(f"[小红书]   ✓ 选中标签: {text.strip()}")
-                    self.page.wait_for_timeout(500)
-            
+                try:
+                    tags_loc = self.page.locator(sel)
+                    count = tags_loc.count()
+
+                    for i in range(min(count, max_tags - selected)):
+                        loc = tags_loc.nth(i)
+                        text = loc.text_content() or ""
+                        text = text.strip()
+
+                        # 提取单个标签（取第一个#开头的内容）
+                        if text.startswith("#"):
+                            # 如果文本太长，可能是选中了容器，跳过
+                            if len(text) > 50:
+                                continue
+                            # 避免重复
+                            if text in selected_texts:
+                                continue
+
+                            loc.click()
+                            selected_texts.add(text)
+                            selected += 1
+                            print(f"[小红书]   ✓ 选中标签: {text}")
+                            self.page.wait_for_timeout(500)
+                except Exception:
+                    continue
+
+            # 兜底：通过JS查找并点击标签
+            if selected == 0:
+                clicked = self.page.evaluate("""(maxTags) => {
+                    const allElements = document.querySelectorAll('*');
+                    let clickedCount = 0;
+                    const clickedTexts = new Set();
+
+                    for (const el of allElements) {
+                        if (clickedCount >= maxTags) break;
+
+                        const text = el.textContent?.trim() || '';
+                        // 匹配单个标签格式：#中文或英文，长度适中
+                        if (text.startsWith('#') && text.length > 1 && text.length <= 20) {
+                            // 检查是否是独立标签元素（不是包含多个标签的容器）
+                            const parentText = el.parentElement?.textContent?.trim() || '';
+                            if (parentText.length > text.length + 10) continue;  // 父元素文本太长，可能是容器
+
+                            if (!clickedTexts.has(text)) {
+                                el.click();
+                                clickedTexts.add(text);
+                                clickedCount++;
+                                console.log('选中标签:', text);
+                            }
+                        }
+                    }
+                    return clickedCount;
+                }""", max_tags)
+                if clicked > 0:
+                    print(f"[小红书]   ✓ 通过JS选中 {clicked} 个标签")
+                    selected = clicked
+
             if selected == 0:
                 print("[小红书] 未匹配到推荐标签")
         except Exception as e:
