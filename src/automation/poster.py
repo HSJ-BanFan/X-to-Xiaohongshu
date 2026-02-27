@@ -369,8 +369,9 @@ class XiaohongshuPoster:
         tags = re.findall(r'#[\w\u4e00-\u9fa5_]+', content)
         
         # 彻底移除正文里的所有标签（包括前后空格、标点）
-        clean_content = re.sub(r'\s*#[\w\u4e00-\u9fa5_]+\s*', ' ', content).strip()
-        clean_content = re.sub(r'\s+', ' ', clean_content)  # 合并多余空格
+        clean_content = re.sub(r'[ \t]*#[\w\u4e00-\u9fa5_]+[ \t]*', ' ', content).strip()
+        clean_content = re.sub(r'[ \t]+', ' ', clean_content)  # 只合并同行多余空格，绝不碰 \n
+        clean_content = re.sub(r'\n{3,}', '\n\n', clean_content) # 超过两行的连续回车压缩为最多两行
         
         # 去重 + 限制数量（小红书建议 ≤12 个）
         unique_tags = list(dict.fromkeys(tags))[:12]
@@ -421,13 +422,15 @@ class XiaohongshuPoster:
 
     def _fill_content(self, content: str):
         """填写正文描述，提取标签并处理Emoji"""
-        # 新增：强制清理标签位置
+        # Extract hashtags before cleaning
+        hashtags_to_type = re.findall(r"#([\w一-龥_]+)", content)[:5]
+        
+        # Clean and move hashtags to end
         content = self._clean_and_move_hashtags(content)
         
         print(f"[小红书] 填写正文描述 ({len(content)} 字)...")
         try:
             main_content = content
-            hashtags_to_type = []  # 标签已经在正文末尾，不再需要独立输入循环
 
             # 兼容新版 UI：嵌套的富文本编辑器 .editor-content .tiptap.ProseMirror
             selectors = [

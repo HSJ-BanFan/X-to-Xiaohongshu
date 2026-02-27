@@ -13,3 +13,6 @@ build/
 x_to_xhs.log
 processed_urls.json
 debug_xhs_locators/
+.agent/
+artifacts/
+

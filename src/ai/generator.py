@@ -1,5 +1,9 @@
 import json
 import logging
+import re
+import time
+import requests
+import logging
 import time
 import requests
 
@@ -344,7 +348,11 @@ def generate_original_note(
                 reply_text = reply_text[:-3]
 
             data = json.loads(reply_text.strip())
-            title = data.get("title", "")[:30]
+            title = data.get("title", "")[:20]
+            content = data.get("content", "")
+            # 排版清理
+            content = content.replace('\\n', '\n')
+            content = re.sub(r'\n{3,}', '\n\n', content).strip()
             content = data.get("content", "")
 
             logger.info(f"✅ 原创笔记生成完毕！标题: {title}")
@@ -491,7 +499,11 @@ def generate_hybrid_note(
                 reply_text = reply_text[:-3]
 
             data = json.loads(reply_text.strip())
-            title = data.get("title", "")[:30]
+            title = data.get("title", "")[:20]
+            content = data.get("content", "")
+            # 排版清理
+            content = content.replace('\\n', '\n')
+            content = re.sub(r'\n{3,}', '\n\n', content).strip()
             content = data.get("content", "")
 
             logger.info(f"✅ 混合模式生成完毕！标题: {title}")
@@ -510,3 +522,89 @@ def generate_hybrid_note(
                 )
 
     return "", ""
+
+def generate_natural_xhs_note(original_text: str, rag_examples: str = "") -> tuple[str, str]:
+    """
+    低网感真实感写作方法（Two-Stage Humanize + Self Reflection）
+    
+    Args:
+        original_text: 原文素材内容
+        rag_examples: 检索到的相关知识库参考资料等
+    
+    Returns:
+        (title, content)
+    """
+    if not LLM_API_KEY:
+        logger.warning("未配置 LLM_API_KEY，跳过 AI 生成，返回原文。")
+        return "", original_text
+
+    logger.info(f"正在调用 {LLM_MODEL} 生成【低网感/自然版】小红书文案...")
+
+    from src.ai.prompts import PERSONA, STYLE_CONSTRAINT, FEW_SHOT_EXAMPLES, HUMANIZE_PROMPT, REFLECT_PROMPT, get_json_structure_instruction
+
+    # 1. 第一步：生成初稿 (draft)
+    json_instruction = get_json_structure_instruction()
+    full_prompt = f"{PERSONA}\n\n{STYLE_CONSTRAINT}\n\n参考样本：\n{FEW_SHOT_EXAMPLES}\n\n素材：\n{original_text}\n{rag_examples}\n\n{json_instruction}"
+    
+    headers = {
+        "Authorization": f"Bearer {LLM_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    
+    session = requests.Session()
+    session.trust_env = False
+    
+    def llm_call(prompt_text, temperature=0.7):
+        payload = {
+            "model": LLM_MODEL,
+            "messages": [
+                {"role": "system", "content": "你是一个输出纯 JSON 的 API 服务器。不要输出任何多余说明，不要加Markdown。"},
+                {"role": "user", "content": prompt_text}
+            ],
+            "temperature": temperature,
+            "response_format": {"type": "json_object"}
+        }
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                resp = session.post(f"{LLM_BASE_URL}/chat/completions", headers=headers, json=payload, timeout=60)
+                resp.raise_for_status()
+                reply = resp.json()["choices"][0]["message"]["content"].strip()
+                if reply.startswith("```json"): reply = reply[7:]
+                if reply.startswith("```"): reply = reply[3:]
+                if reply.endswith("```"): reply = reply[:-3]
+                return reply.strip()
+            except Exception as e:
+                if attempt < MAX_RETRIES:
+                    time.sleep(RETRY_DELAY)
+                else:
+                    logger.error(f"LLM调用失败: {e}")
+                    return "{}"
+        return "{}"
+
+    # 第一步: 生成初稿
+    logger.info("  -> [1/3] 生成初稿中...")
+    draft_json = llm_call(full_prompt, temperature=0.7)
+    
+    # 第二步：去AI味
+    logger.info("  -> [2/3] 进行去AI味改写...")
+    humanize_prompt = HUMANIZE_PROMPT.format(draft=draft_json) + f"\n\n{json_instruction}"
+    natural_json = llm_call(humanize_prompt, temperature=0.7)
+    
+    # 第三步：自检
+    logger.info("  -> [3/3] 终稿自检自纠...")
+    reflect_prompt = REFLECT_PROMPT.format(text=natural_json) + f"\n\n{json_instruction}"
+    final_json_str = llm_call(reflect_prompt, temperature=0.5)
+
+    try:
+        import re
+        data = json.loads(final_json_str)
+        title = data.get("title", "")[:20]
+        content = data.get("content", "")
+        # 排版清理
+        content = content.replace('\\n', '\n')
+        content = re.sub(r'\n{3,}', '\n\n', content).strip()
+        logger.info(f"✅ 【低网感/自然版】生成完毕！标题: {title}")
+        return title, content
+    except Exception as e:
+        logger.error(f"解析最终 JSON 失败: {e}")
+        return "", original_text
