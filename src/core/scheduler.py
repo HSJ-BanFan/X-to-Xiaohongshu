@@ -5,7 +5,7 @@
   发现推文 → AI 评分 → 抓取/处理 → 发布到小红书
 
 用法:
-    from src.scheduler import AutoScheduler
+    from src.core.scheduler import AutoScheduler
     scheduler = AutoScheduler()
     scheduler.start()  # 阻塞运行
 """
@@ -19,7 +19,7 @@ import time
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 from config import (
-    SCHEDULER_INTERVAL_HOURS,
+    SCHEDULER_INTERVAL_MINUTES,
     SCHEDULER_MAX_POSTS_PER_RUN,
     BATCH_DELAY_MIN,
     BATCH_DELAY_MAX,
@@ -37,17 +37,17 @@ logger = logging.getLogger(__name__)
 class AutoScheduler:
     """全自动调度：发现 → 评分 → 抓取 → 发布"""
 
-    def __init__(self, interval_hours: int = None, max_posts: int = None):
-        self.interval = interval_hours or SCHEDULER_INTERVAL_HOURS
+    def __init__(self, interval_minutes: int = None, max_posts: int = None):
+        self.interval = interval_minutes or SCHEDULER_INTERVAL_MINUTES
         self.max_posts = max_posts or SCHEDULER_MAX_POSTS_PER_RUN
         self._scheduler = BlockingScheduler()
 
     def _run_cycle(self):
         """执行一个完整的自动化周期"""
         import os
-        from .discovery import TweetDiscovery
-        from .scraper import XScraper
-        from .poster import XiaohongshuPoster
+        from src.core.discovery import TweetDiscovery
+        from src.automation.scraper import XScraper
+        from src.automation.poster import XiaohongshuPoster
 
         logger.info("=" * 60)
         logger.info("🤖 自动化周期开始")
@@ -72,7 +72,7 @@ class AutoScheduler:
 
         # 2. AI 评分（仅打分，不过滤）
         if AI_SCORING_ENABLED:
-            from .ai_generator import score_tweet_potential
+            from src.ai.generator import score_tweet_potential
             logger.info("📊 预评分推文...")
             for url in urls:
                 try:
@@ -95,7 +95,7 @@ class AutoScheduler:
 
         try:
             # 延迟导入避免循环引用
-            from .pipeline import process_single_tweet
+            from src.core.pipeline import process_single_tweet
 
             for idx, url in enumerate(urls, 1):
                 logger.info(f"[自动处理] {idx}/{len(urls)}: {url}")
@@ -118,7 +118,7 @@ class AutoScheduler:
 
     def start(self):
         """启动调度器（阻塞运行）"""
-        logger.info(f"🚀 全自动模式启动！每 {self.interval} 小时运行一次")
+        logger.info(f"🚀 全自动模式启动！每 {self.interval} 分钟运行一次")
         logger.info(f"   每轮最多处理 {self.max_posts} 条推文")
         logger.info("   按 Ctrl+C 停止\n")
 
@@ -129,19 +129,20 @@ class AutoScheduler:
         self._scheduler.add_job(
             self._run_cycle,
             "interval",
-            hours=self.interval,
+            minutes=self.interval,
             id="auto_cycle",
             name="X-to-XHS 自动化周期",
         )
 
-        # 优雅退出
-        def _graceful_shutdown(signum, frame):
-            logger.info("\n⛔ 收到退出信号，正在关闭调度器...")
-            self._scheduler.shutdown(wait=False)
-            sys.exit(0)
+        # 优雅退出 (仅类 Unix 系统支持部分信号，Windows下使用 try-except 足矣)
+        if sys.platform != "win32":
+            def _graceful_shutdown(signum, frame):
+                logger.info("\n⛔ 收到退出信号，正在关闭调度器...")
+                self._scheduler.shutdown(wait=False)
+                sys.exit(0)
 
-        signal.signal(signal.SIGINT, _graceful_shutdown)
-        signal.signal(signal.SIGTERM, _graceful_shutdown)
+            signal.signal(signal.SIGINT, _graceful_shutdown)
+            signal.signal(signal.SIGTERM, _graceful_shutdown)
 
         try:
             self._scheduler.start()

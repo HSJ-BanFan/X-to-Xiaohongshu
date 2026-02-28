@@ -17,6 +17,32 @@ from selenium.webdriver.support import expected_conditions as EC
 from config import XHS_COOKIES_FILE
 
 
+def safe_find(driver, by, value, timeout=10, name="未知元素"):
+    """安全查找元素，失败时自动保存截图和源码"""
+    try:
+        return WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((by, value))
+        )
+    except Exception as e:
+        import time
+        timestamp = int(time.time())
+        screenshot_path = f"debug_screenshots/{name}_fail_{timestamp}.png"
+        html_path = f"debug_screenshots/{name}_fail_{timestamp}.html"
+        try:
+            driver.save_screenshot(screenshot_path)
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+            print(f"[XHS ERROR] 获取元素失败: {name}, 已保存现场: {screenshot_path}, {html_path}")
+        except Exception as screen_e:
+            print(f"[XHS ERROR] 保存现场截图失败: {screen_e}")
+            
+        print(f"[XHS ERROR] 元素 {name} 查找失败({by}={value})。可能原因：")
+        print("1. 页面元素选择器已更改（例如页面改版）。")
+        print("2. 页面加载异常缓慢或网络中断。")
+        print("3. 被反爬验证码拦截或存在弹窗遮挡。")
+        raise e
+
+
 class XiaohongshuPoster:
     """小红书创作者平台自动发布"""
 
@@ -179,17 +205,13 @@ class XiaohongshuPoster:
             print("[小红书] 切换到 写长文 发布模式...")
             try:
                 # 切换"写长文" Tab
-                tab = WebDriverWait(self.driver, 5).until(
-                    EC.presence_of_element_located((By.XPATH, "//*[contains(text(), '写长文')]"))
-                )
+                tab = safe_find(self.driver, By.XPATH, "//*[contains(text(), '写长文')]", timeout=5, name="写长文Tab")
                 self.driver.execute_script("arguments[0].click();", tab)
                 time.sleep(2)
                 
                 # 长文界面需要点击"新的创作"按钮才能开始写
                 try:
-                    new_btn = WebDriverWait(self.driver, 3).until(
-                        EC.presence_of_element_located((By.XPATH, "//*[contains(text(), '新的创作')]"))
-                    )
+                    new_btn = safe_find(self.driver, By.XPATH, "//*[contains(text(), '新的创作')]", timeout=3, name="新的创作按钮")
                     self.driver.execute_script("arguments[0].click();", new_btn)
                     time.sleep(2)
                 except Exception:
@@ -199,9 +221,7 @@ class XiaohongshuPoster:
         elif video:
             print("[小红书] 切换到 视频 发布模式...")
             try:
-                tab = WebDriverWait(self.driver, 5).until(
-                    EC.element_to_be_clickable((By.XPATH, "//*[text()='上传视频' or text()='发布视频']"))
-                )
+                tab = safe_find(self.driver, By.XPATH, "//*[text()='上传视频' or text()='发布视频']", timeout=5, name="发布视频Tab")
                 tab.click()
                 time.sleep(1)
             except Exception:
@@ -210,9 +230,7 @@ class XiaohongshuPoster:
             print("[小红书] 切换到 图文 发布模式...")
             try:
                 # 使用 XPath 模糊匹配，并用 JS 点击以防被遮挡
-                tab = WebDriverWait(self.driver, 5).until(
-                    EC.presence_of_element_located((By.XPATH, "//*[contains(text(), '图文')]"))
-                )
+                tab = safe_find(self.driver, By.XPATH, "//*[contains(text(), '图文')]", timeout=5, name="发布图文Tab")
                 self.driver.execute_script("arguments[0].click();", tab)
                 time.sleep(2)
             except Exception as e:
@@ -234,9 +252,7 @@ class XiaohongshuPoster:
         try:
             if use_long_article:
                 # 长文的标题使用的是 textarea
-                title_input = WebDriverWait(self.driver, 5).until(
-                    EC.presence_of_element_located((By.XPATH, "//textarea[contains(@class, 'd-text') or @placeholder='起个响亮的标题吧']"))
-                )
+                title_input = safe_find(self.driver, By.XPATH, "//textarea[contains(@class, 'd-text') or @placeholder='起个响亮的标题吧']", timeout=5, name="长文标题输入框")
                 title_input.clear()
                 # 使用 JS 赋值避免 BMP 字符（如 emoji）导致 ChromeDriver 崩溃
                 self.driver.execute_script("""
@@ -252,9 +268,7 @@ class XiaohongshuPoster:
         try:
             if use_long_article:
                 # 长文内容框使用的是特殊的富文本编辑器 (Tiptap / ProseMirror)
-                content_input = WebDriverWait(self.driver, 5).until(
-                    EC.presence_of_element_located((By.XPATH, "//*[@data-placeholder='粘贴到这里或输入文字'] | //div[contains(@class, 'ProseMirror')]"))
-                )
+                content_input = safe_find(self.driver, By.XPATH, "//*[@data-placeholder='粘贴到这里或输入文字'] | //div[contains(@class, 'ProseMirror')]", timeout=5, name="长文正文输入框")
                 
                 # 点击聚焦
                 self.driver.execute_script("arguments[0].focus();", content_input)
@@ -265,9 +279,27 @@ class XiaohongshuPoster:
                 content_input.clear()
                 
                 # 为了防止表情导致 ChromeDriver 崩溃，或者大段文本输入慢，
-                # 我们可以用 JS 赋值 + send_keys 混合，或者过滤掉过于底层的字符
-                # 这里先将文本贴入
-                html_content = content.replace('\n', '<br>')
+                import re
+                from selenium.webdriver.common.keys import Keys
+                
+                # 提取所有的 hashtags，支持过滤标点和[话题]后缀
+                pattern = r'#([^\s#，。！？,。!?"\'\[\]]+)(?:\[话题\]#?)?'
+                matches = list(re.finditer(pattern, content))
+                
+                # 从主文本中剔除所有 hashtags，连带前面的可能空格一起剔除
+                main_content = re.sub(r'\s*' + pattern + r'\s*', ' ', content)
+                
+                # 剔除连续的多余空行
+                main_content = re.sub(r'\n{3,}', '\n\n', main_content).strip()
+
+                hashtags_to_type = []
+                for m in matches:
+                    tag_name = m.group(1)
+                    if tag_name not in hashtags_to_type:
+                        hashtags_to_type.append(tag_name)
+                
+                # 清空编辑器并用 JS 输入主内容
+                html_content = main_content.replace('\n', '<br>')
                 self.driver.execute_script("""
                     var editor = arguments[0];
                     var text = arguments[1];
@@ -281,18 +313,6 @@ class XiaohongshuPoster:
                 content_input.send_keys(" ")
                 time.sleep(0.5)
                 content_input.send_keys("\\b")
-                
-                # 触发一下 hashtags 处理
-                import re
-                from selenium.webdriver.common.keys import Keys
-                
-                pattern = r'#([^\s#，。！？,。!?"\'\[\]]+)(?:\[话题\]#?)?'
-                matches = list(re.finditer(pattern, content))
-                
-                hashtags_to_type = []
-                for m in matches:
-                    if m.group(1) not in hashtags_to_type:
-                        hashtags_to_type.append(m.group(1))
                         
                 if hashtags_to_type:
                      content_input.send_keys('\n\n')
@@ -337,9 +357,7 @@ class XiaohongshuPoster:
 
         try:
             # 查找上传 input
-            upload_input = self.wait.until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='file']"))
-            )
+            upload_input = safe_find(self.driver, By.CSS_SELECTOR, "input[type='file']", timeout=20, name="图片上传input")
             
             # 强制添加 multiple 属性，防止报错 "element can not hold multiple files"
             self.driver.execute_script("arguments[0].setAttribute('multiple', 'multiple');", upload_input)
@@ -359,9 +377,7 @@ class XiaohongshuPoster:
         abs_path = os.path.abspath(video_path)
 
         try:
-            upload_input = self.wait.until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='file']"))
-            )
+            upload_input = safe_find(self.driver, By.CSS_SELECTOR, "input[type='file']", timeout=20, name="视频上传input")
             upload_input.send_keys(abs_path)
             print("[小红书] 视频已上传，等待处理（可能需要较长时间）...")
             # 视频处理需要更多时间
@@ -389,9 +405,7 @@ class XiaohongshuPoster:
             title_input = None
             for sel in selectors:
                 try:
-                    title_input = WebDriverWait(self.driver, 5).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, sel))
-                    )
+                    title_input = safe_find(self.driver, By.CSS_SELECTOR, sel, timeout=5, name="常规标题输入框")
                     if title_input:
                         break
                 except Exception:
@@ -434,9 +448,7 @@ class XiaohongshuPoster:
             editor = None
             for sel in selectors:
                 try:
-                    editor = WebDriverWait(self.driver, 5).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, sel))
-                    )
+                    editor = safe_find(self.driver, By.CSS_SELECTOR, sel, timeout=5, name="常规正文输入框")
                     if editor:
                         break
                 except Exception:
@@ -451,16 +463,17 @@ class XiaohongshuPoster:
                 pattern = r'#([^\s#，。！？,。!?"\'\[\]]+)(?:\[话题\]#?)?'
                 matches = list(re.finditer(pattern, content))
                 
-                # 从主文本中剔除所有 hashtags
-                main_content = content
+                # 从主文本中剔除所有 hashtags，连带前面的可能空格一起剔除
+                main_content = re.sub(r'\s*' + pattern + r'\s*', ' ', content)
+                
+                # 剔除连续的多余空行（将 3 个以上的换行替换为 2 个）
+                main_content = re.sub(r'\n{3,}', '\n\n', main_content).strip()
+
                 hashtags_to_type = []
                 for m in matches:
-                    full_match = m.group(0)
                     tag_name = m.group(1)
-                    main_content = main_content.replace(full_match, '')
                     if tag_name not in hashtags_to_type:
                         hashtags_to_type.append(tag_name)
-                main_content = main_content.strip()
 
                 # 清空编辑器并用 JS 输入主内容，避免 ChromeDriver 的 BMP emoji 报错
                 html_content = main_content.replace('\n', '<br>')
@@ -530,13 +543,9 @@ class XiaohongshuPoster:
             for sel in selectors:
                 try:
                     if sel.startswith("//"):
-                        btn = WebDriverWait(self.driver, 5).until(
-                            EC.element_to_be_clickable((By.XPATH, sel))
-                        )
+                        btn = safe_find(self.driver, By.XPATH, sel, timeout=5, name="发布按钮_XPATH")
                     else:
-                        btn = WebDriverWait(self.driver, 5).until(
-                            EC.element_to_be_clickable((By.CSS_SELECTOR, sel))
-                        )
+                        btn = safe_find(self.driver, By.CSS_SELECTOR, sel, timeout=5, name="发布按钮_CSS")
                     btn.click()
                     return
                 except Exception:

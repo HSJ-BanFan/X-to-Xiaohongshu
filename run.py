@@ -13,7 +13,7 @@ X-to-XHS 启动入口
     python run.py                         # 交互模式
 """
 
-from src.pipeline import main
+from src.core.pipeline import main
 
 if __name__ == "__main__":
     main()

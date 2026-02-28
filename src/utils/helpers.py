@@ -119,7 +119,14 @@ def download_file(url: str, save_path: str, headers: dict = None) -> str:
         _headers.update(headers)
 
     session = requests.Session()
-    session.trust_env = False
+    session.trust_env = True
+    
+    try:
+        from config import PROXY_URL
+        if PROXY_URL:
+            session.proxies = {"http": PROXY_URL, "https": PROXY_URL}
+    except ImportError:
+        pass
 
     response = session.get(
         url,
