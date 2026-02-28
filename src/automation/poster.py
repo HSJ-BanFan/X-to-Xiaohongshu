@@ -376,26 +376,18 @@ class XiaohongshuPoster:
 
 
     def _clean_and_move_hashtags(self, content: str) -> str:
-        """彻底清理正文里的所有 #标签，最后统一追加到末尾"""
-        # 提取所有标签（支持中文、英文、数字、各种后缀）
-        tags = re.findall(r'#[\w\u4e00-\u9fa5_]+', content)
-
-        # 彻底移除正文里的所有标签（保留原本前后的自然连贯，并且处理可能因标签独立成行造成的空行断层）
+        """清理正文里的所有 #标签（只依赖推荐标签，不从AI内容提取）"""
+        # 彻底移除正文里的所有标签
         clean_content = re.sub(r'\s*#[\w\u4e00-\u9fa5_]+\s*', '', content).strip()
         clean_content = re.sub(r'[ \t]+', ' ', clean_content)  # 只合并同行多余空格，绝不碰 \n
         clean_content = re.sub(r'\n{3,}', '\n\n', clean_content) # 超过两行的连续回车压缩为最多两行
-        
-        # 去重 + 限制数量（小红书建议 ≤12 个）
-        unique_tags = list(dict.fromkeys(tags))[:12]
-        # 注意：此处用带空格的前缀组装，以配合 Playwright 纯文本插入时触发小红书变色！
-        hashtag_str = " ".join([tag if tag.startswith('#') else f"#{tag}" for tag in unique_tags])
-        
+
         # 确保正文自然结尾
         if clean_content and not clean_content.endswith(('。', '！', '？', '!', '?', '…')):
             clean_content += "。"
-        
-        # 强制增加两行回车，以保证 hashtag_str 总是稳稳挂在最后一行
-        return f"{clean_content}\n\n{hashtag_str}"
+
+        # 不再添加标签到末尾，标签将通过推荐标签系统选择
+        return clean_content
 
     def _fill_title(self, title: str):
         """填写标题"""
@@ -587,41 +579,342 @@ class XiaohongshuPoster:
                 except Exception:
                     continue
 
+            # 首先尝试点击话题输入框来触发推荐标签
+            print("[小红书]   尝试触发标签推荐...")
+            try:
+                # 尝试找到并点击话题输入框
+                topic_input_selectors = [
+                    "input[placeholder*='话题']",
+                    "input[placeholder*='标签']",
+                    ".topic-input",
+                    ".tag-input",
+                    "[data-testid='topic-input']",
+                ]
+                for sel in topic_input_selectors:
+                    try:
+                        input_loc = self.page.locator(sel).first
+                        if input_loc.is_visible(timeout=1000):
+                            input_loc.click()
+                            print(f"[小红书]   已点击话题输入框: {sel}")
+                            self.page.wait_for_timeout(2000)
+                            break
+                    except:
+                        continue
+            except Exception as e:
+                print(f"[小红书]   触发推荐失败: {e}")
+
             # 兜底：通过JS查找并点击标签
-            if selected == 0:
+            if selected < max_tags:
+                remaining = max_tags - selected
+                print(f"[小红书]   开始JS查找，需要 {remaining} 个")
+
                 clicked = self.page.evaluate("""(maxTags) => {
-                    const allElements = document.querySelectorAll('*');
-                    let clickedCount = 0;
-                    const clickedTexts = new Set();
+                    console.log('JS执行，maxTags=', maxTags);
 
-                    for (const el of allElements) {
-                        if (clickedCount >= maxTags) break;
+                    // 策略1: 尝试用特定选择器找推荐标签
+                    var tagSelectors = [
+                        '.tag', '.topic', '.tag-item', '.topic-item',
+                        '[class*="tag"]:not(.tiptap-topic)', '[class*="topic"]',
+                        '.recommend-tag', '.suggested-tag'
+                    ];
+                    var allTagElements = [];
+                    for (var s = 0; s < tagSelectors.length; s++) {
+                        try {
+                            var found = document.querySelectorAll(tagSelectors[s]);
+                            for (var f = 0; f < found.length; f++) {
+                                allTagElements.push(found[f]);
+                            }
+                        } catch(e) {}
+                    }
+                    console.log('通过选择器找到标签元素:', allTagElements.length);
 
-                        const text = el.textContent?.trim() || '';
-                        // 匹配单个标签格式：#中文或英文，长度适中
-                        if (text.startsWith('#') && text.length > 1 && text.length <= 20) {
-                            // 检查是否是独立标签元素（不是包含多个标签的容器）
-                            const parentText = el.parentElement?.textContent?.trim() || '';
-                            if (parentText.length > text.length + 10) continue;  // 父元素文本太长，可能是容器
-
-                            if (!clickedTexts.has(text)) {
-                                el.click();
-                                clickedTexts.add(text);
-                                clickedCount++;
-                                console.log('选中标签:', text);
+                    // 策略2: 如果策略1没找到足够多，遍历所有元素
+                    if (allTagElements.length < maxTags) {
+                        var allElements = Array.from(document.querySelectorAll('*'));
+                        for (var i = 0; i < allElements.length; i++) {
+                            var el = allElements[i];
+                            // 排除正文编辑区域的元素
+                            if (el.closest('.ProseMirror') || el.closest('[contenteditable]') ||
+                                el.closest('.editor') || el.closest('.tiptap')) {
+                                continue;
+                            }
+                            // 检查是否是标签元素
+                            var text = el.textContent ? el.textContent.trim() : '';
+                            if (text.startsWith('#') && text.length > 1 && text.length <= 20) {
+                                // 检查是否在推荐区域（父元素有特定class）
+                                var parent = el.parentElement;
+                                var grandparent = parent ? parent.parentElement : null;
+                                if ((parent && (parent.classList.contains('tag') ||
+                                               parent.classList.contains('topic') ||
+                                               parent.className.indexOf('tag') >= 0)) ||
+                                    (grandparent && (grandparent.classList.contains('tag') ||
+                                                    grandparent.classList.contains('topic')))) {
+                                    allTagElements.push(el);
+                                }
                             }
                         }
                     }
-                    return clickedCount;
-                }""", max_tags)
-                if clicked > 0:
-                    print(f"[小红书]   ✓ 通过JS选中 {clicked} 个标签")
-                    selected = clicked
+                    console.log('总共找到标签候选:', allTagElements.length);
 
-            if selected == 0:
-                print("[小红书] 未匹配到推荐标签")
+                    // 去重
+                    var uniqueElements = [];
+                    var seenTexts = new Set();
+                    for (var i = 0; i < allTagElements.length; i++) {
+                        var el = allTagElements[i];
+                        var text = el.textContent ? el.textContent.trim() : '';
+                        if (text && !seenTexts.has(text)) {
+                            seenTexts.add(text);
+                            uniqueElements.push(el);
+                        }
+                    }
+                    console.log('去重后标签数:', uniqueElements.length);
+
+                    // 点击标签
+                    var clickedCount = 0;
+                    var clickedTexts = new Set();
+                    var results = [];
+
+                    for (var i = 0; i < uniqueElements.length && clickedCount < maxTags; i++) {
+                        var el = uniqueElements[i];
+                        var text = el.textContent ? el.textContent.trim() : '';
+
+                        // 过滤掉 "更多" 等非话题标签
+                        if (text === '更多' || text === 'more' || text === 'MORE') continue;
+
+                        // 检查是否已选中
+                        var checkEl = el;
+                        var isBlue = false;
+                        for (var j = 0; j < 3 && checkEl; j++) {
+                            var style = window.getComputedStyle(checkEl);
+                            if (style.color.indexOf('rgb(59') >= 0 ||
+                                style.color.indexOf('rgb(64') >= 0 ||
+                                style.backgroundColor.indexOf('rgb(59') >= 0 ||
+                                style.backgroundColor.indexOf('rgb(230') >= 0 ||
+                                checkEl.classList.contains('selected') ||
+                                checkEl.classList.contains('active')) {
+                                isBlue = true;
+                                break;
+                            }
+                            checkEl = checkEl.parentElement;
+                        }
+                        if (isBlue) continue;
+
+                        // 找到可点击的元素（向上找button或带clickable的元素）
+                        var clickableEl = el;
+                        var parent = el.parentElement;
+                        for (var j = 0; j < 4 && parent; j++) {
+                            if (parent.tagName === 'BUTTON' ||
+                                parent.tagName === 'A' ||
+                                parent.classList.contains('tag') ||
+                                parent.classList.contains('topic') ||
+                                parent.getAttribute('role') === 'button' ||
+                                window.getComputedStyle(parent).cursor === 'pointer') {
+                                clickableEl = parent;
+                                break;
+                            }
+                            parent = parent.parentElement;
+                        }
+
+                        try {
+                            clickableEl.scrollIntoView({ behavior: 'instant', block: 'center' });
+                            clickableEl.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                            clickableEl.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                            clickableEl.click();
+
+                            clickedTexts.add(text);
+                            clickedCount++;
+                            results.push(text);
+                            console.log('✓ 点击标签:', text);
+
+                            var start = Date.now();
+                            while (Date.now() - start < 600) {}
+                        } catch(e) {
+                            console.log('点击失败:', text, e);
+                        }
+                    }
+
+                    return { count: clickedCount, tags: results };
+                }""", remaining)
+
+                print(f"[小红书]   JS返回: {clicked}")
+                if clicked and clicked.get('count'):
+                    print(f"[小红书]   ✓ JS选中 {clicked['count']} 个: {', '.join(clicked['tags'])}")
+                    selected += clicked['count']
+                else:
+                    print(f"[小红书]   JS未找到标签")
+
+            # 验证实际选中数量
+            self.page.wait_for_timeout(2000)
+            actual = self.page.evaluate("""() => {
+                var allElements = Array.from(document.querySelectorAll('*'));
+                var selectedTags = [];
+
+                for (var i = 0; i < allElements.length; i++) {
+                    var el = allElements[i];
+                    var text = el.textContent ? el.textContent.trim() : '';
+                    if (!text.startsWith('#') || text.length <= 1 || text.length > 25) continue;
+
+                    var style = window.getComputedStyle(el);
+                    var parent = el.parentElement;
+                    var grandparent = parent && parent.parentElement;
+
+                    // 检查元素本身、父元素、祖父元素的样式
+                    var isBlue = false;
+                    var checkEl = el;
+                    for (var checkCount = 0; checkCount < 3 && checkEl; checkCount++) {
+                        var checkStyle = window.getComputedStyle(checkEl);
+
+                        // 蓝色文字
+                        if (checkStyle.color.indexOf('rgb(59') >= 0 ||
+                            checkStyle.color.indexOf('rgb(64') >= 0 ||
+                            checkStyle.color.indexOf('rgb(41') >= 0 ||
+                            checkStyle.color.indexOf('rgb(25') >= 0 ||
+                            checkStyle.color.indexOf('rgb(16') >= 0 ||
+                            checkStyle.color.indexOf('#3b') >= 0 ||
+                            checkStyle.color.indexOf('#40') >= 0 ||
+                            checkStyle.color.indexOf('#2979') >= 0) {
+                            isBlue = true;
+                            break;
+                        }
+
+                        // 蓝色背景（选中状态常见）
+                        if (checkStyle.backgroundColor.indexOf('rgb(59') >= 0 ||
+                            checkStyle.backgroundColor.indexOf('rgb(64') >= 0 ||
+                            checkStyle.backgroundColor.indexOf('rgb(230') >= 0 ||
+                            checkStyle.backgroundColor.indexOf('rgb(240') >= 0 ||
+                            checkStyle.backgroundColor.indexOf('#e6f') >= 0 ||
+                            checkStyle.backgroundColor.indexOf('#3b') >= 0) {
+                            isBlue = true;
+                            break;
+                        }
+
+                        // 边框变蓝
+                        if (checkStyle.borderColor.indexOf('rgb(59') >= 0 ||
+                            checkStyle.borderColor.indexOf('#3b') >= 0) {
+                            isBlue = true;
+                            break;
+                        }
+
+                        // class 标记
+                        if (checkEl.classList.contains('selected') ||
+                            checkEl.classList.contains('active') ||
+                            checkEl.classList.contains('checked') ||
+                            checkEl.classList.contains('chosen') ||
+                            checkEl.classList.contains('tiptap-topic') ||
+                            checkEl.getAttribute('aria-selected') === 'true') {
+                            isBlue = true;
+                            break;
+                        }
+
+                        checkEl = checkEl.parentElement;
+                    }
+
+                    if (isBlue) {
+                        selectedTags.push({
+                            text: text,
+                            color: style.color,
+                            bgColor: style.backgroundColor,
+                            className: el.className,
+                            parentClassName: parent ? parent.className : ''
+                        });
+                    }
+                }
+
+                // 去重：使用 Set 按 text 去重
+                var uniqueMap = new Map();
+                for (var j = 0; j < selectedTags.length; j++) {
+                    var tag = selectedTags[j];
+                    // 过滤掉 "更多" 等非话题标签
+                    if (tag.text === '更多') continue;
+                    // 保留第一个出现的
+                    if (!uniqueMap.has(tag.text)) {
+                        uniqueMap.set(tag.text, tag);
+                    }
+                }
+                var uniqueTags = Array.from(uniqueMap.values());
+
+                return {
+                    count: uniqueTags.length,
+                    tags: uniqueTags
+                };
+            }""")
+
+            print(f"[小红书]   验证: {actual.get('count', 0)} 个标签已选中")
+            if actual.get('tags'):
+                for tag in actual['tags']:
+                    print(f"            - {tag['text']}")
+
+            # 如果验证为0但点击了，尝试重新验证一次（等待更长时间）
+            if actual.get('count', 0) == 0 and selected > 0:
+                print("[小红书]   首次验证为0，3秒后重新验证...")
+                self.page.wait_for_timeout(3000)
+                actual = self.page.evaluate("""() => {
+                    var allElements = Array.from(document.querySelectorAll('*'));
+                    var selectedTags = [];
+
+                    for (var i = 0; i < allElements.length; i++) {
+                        var el = allElements[i];
+                        var text = el.textContent ? el.textContent.trim() : '';
+                        if (!text.startsWith('#') || text.length <= 1 || text.length > 25) continue;
+
+                        var checkEl = el;
+                        var isBlue = false;
+                        for (var checkCount = 0; checkCount < 3 && checkEl; checkCount++) {
+                            var checkStyle = window.getComputedStyle(checkEl);
+                            if (checkStyle.color.indexOf('rgb(59') >= 0 ||
+                                checkStyle.color.indexOf('rgb(64') >= 0 ||
+                                checkStyle.color.indexOf('rgb(16') >= 0 ||
+                                checkStyle.backgroundColor.indexOf('rgb(59') >= 0 ||
+                                checkStyle.backgroundColor.indexOf('rgb(230') >= 0 ||
+                                checkEl.classList.contains('selected') ||
+                                checkEl.classList.contains('active') ||
+                                checkEl.classList.contains('tiptap-topic')) {
+                                isBlue = true;
+                                break;
+                            }
+                            checkEl = checkEl.parentElement;
+                        }
+
+                        if (isBlue) {
+                            selectedTags.push(text);
+                        }
+                    }
+                    // 去重
+                    var uniqueTags = [...new Set(selectedTags)];
+                    return { count: uniqueTags.length, tags: uniqueTags };
+                }""")
+                print(f"[小红书]   重新验证: {actual.get('count', 0)} 个标签已选中")
+
+            # 如果还是0，输出调试信息
+            if actual.get('count', 0) == 0 and selected > 0:
+                print("[小红书]   调试: 页面上所有标签信息:")
+                debug_info = self.page.evaluate("""() => {
+                    var all = Array.from(document.querySelectorAll('*'));
+                    var tags = [];
+                    for (var i = 0; i < all.length; i++) {
+                        var el = all[i];
+                        var text = el.textContent ? el.textContent.trim() : '';
+                        if (text.startsWith('#') && text.length > 1 && text.length <= 25) {
+                            var style = window.getComputedStyle(el);
+                            var parent = el.parentElement;
+                            tags.push({
+                                text: text,
+                                color: style.color,
+                                bg: style.backgroundColor,
+                                elClass: el.className,
+                                parentClass: parent ? parent.className : 'none',
+                                tagName: el.tagName
+                            });
+                        }
+                    }
+                    return tags;
+                }""")
+                for tag in debug_info[:10]:
+                    print(f"            {tag['text']}: color={tag['color']}, bg={tag['bg']}, class={tag['elClass'][:30]}")
         except Exception as e:
             print(f"[小红书] 选取推荐标签出错: {e}")
+            import traceback
+            traceback.print_exc()
 
     def close(self):
         """关闭浏览器"""

@@ -1,9 +1,7 @@
+from __future__ import annotations
 import json
 import logging
 import re
-import time
-import requests
-import logging
 import time
 import requests
 
@@ -106,76 +104,122 @@ def classify_content(tweet_text: str, media_count: int) -> str:
 
 def generate_xhs_content(tweet_text: str, author_name: str, media_count: int = 0) -> tuple[str, str]:
     """
-    使用 LLM 根据推文原文生成小红书风格的标题和正文。
+    使用 LLM 根据推文原文生成小红书风格的标题和正文（集成 humanizer-zh 优化）。
     返回: (title, content)
     """
     if not LLM_API_KEY:
         logger.warning("未配置 LLM_API_KEY，跳过 AI 生成，返回原文。")
         return "", tweet_text
 
-    logger.info(f"正在调用 {LLM_MODEL} 生成小红书文案...")
+    logger.info(f"正在调用 {LLM_MODEL} 生成小红书文案（humanizer增强版）...")
 
     # 先做内容分类
     content_type = classify_content(tweet_text, media_count)
-    
+
     # 获取具体的生成 Prompt
-    from src.ai.prompts import get_generation_prompt, get_json_structure_instruction
+    from src.ai.prompts import get_generation_prompt, get_json_structure_instruction, HUMANIZE_PROMPT_V2
     base_prompt = get_generation_prompt(content_type, tweet_text)
     json_instruction = get_json_structure_instruction()
     full_prompt = base_prompt + "\n\n" + json_instruction
 
-    payload = {
-        "model": LLM_MODEL,
-        "messages": [
-            {"role": "system", "content": "你是一个输出纯 JSON 的 API 服务器。不要输出任何多余说明，不要加Markdown。"},
-            {"role": "user", "content": full_prompt}
-        ],
-        "temperature": 0.85,
-        "response_format": {"type": "json_object"}
+    headers = {
+        "Authorization": f"Bearer {LLM_API_KEY}",
+        "Content-Type": "application/json",
     }
 
-    last_error = None
-    session = requests.Session()
-    session.trust_env = False
+    def llm_call(prompt_text: str, temperature: float = 0.7) -> str:
+        """内部 LLM 调用辅助函数"""
+        payload = {
+            "model": LLM_MODEL,
+            "messages": [
+                {"role": "system", "content": "你是一个输出纯 JSON 的 API 服务器。不要输出任何多余说明，不要加Markdown。"},
+                {"role": "user", "content": prompt_text}
+            ],
+            "temperature": temperature,
+            "response_format": {"type": "json_object"}
+        }
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            response = session.post(
-                f"{LLM_BASE_URL}/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=60,
-            )
-            response.raise_for_status()
-            result = response.json()
+        session = requests.Session()
+        session.trust_env = False
 
-            reply_text = result["choices"][0]["message"]["content"].strip()
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                response = session.post(
+                    f"{LLM_BASE_URL}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=60,
+                )
+                response.raise_for_status()
+                result = response.json()
 
-            # 容错：如果模型还是加了 markdown
-            if reply_text.startswith("```json"):
-                reply_text = reply_text[7:]
-            if reply_text.startswith("```"):
-                reply_text = reply_text[3:]
-            if reply_text.endswith("```"):
-                reply_text = reply_text[:-3]
+                reply_text = result["choices"][0]["message"]["content"].strip()
 
-            data = json.loads(reply_text.strip())
-            title = data.get("title", "")[:20]  # 强行截断 20 字
-            content = data.get("content", "")
+                # 容错：如果模型还是加了 markdown
+                if reply_text.startswith("```json"):
+                    reply_text = reply_text[7:]
+                if reply_text.startswith("```"):
+                    reply_text = reply_text[3:]
+                if reply_text.endswith("```"):
+                    reply_text = reply_text[:-3]
 
-            logger.info("AI 文案生成完毕！")
-            return title, content
+                return reply_text.strip()
 
-        except Exception as e:
-            last_error = e
-            if attempt < MAX_RETRIES:
-                logger.warning(f"AI 生成第 {attempt} 次失败: {e}，{RETRY_DELAY}s 后重试...")
-                time.sleep(RETRY_DELAY)
-            else:
-                logger.error(f"AI 生成最终失败（共 {MAX_RETRIES} 次尝试）: {last_error}")
+            except Exception as e:
+                if attempt < MAX_RETRIES:
+                    logger.warning(f"LLM 调用第 {attempt} 次失败: {e}，{RETRY_DELAY}s 后重试...")
+                    time.sleep(RETRY_DELAY)
+                else:
+                    logger.error(f"LLM 调用最终失败: {e}")
+                    return "{}"
+        return "{}"
 
-    logger.info("退回原始文案拼接...")
-    return "", tweet_text
+    # ========== 三步流程（集成 humanizer-zh）==========
+
+    # 第一步：生成初稿
+    logger.info("  -> [1/3] 生成初稿...")
+    draft_json_str = llm_call(full_prompt, temperature=0.85)
+
+    try:
+        draft_data = json.loads(draft_json_str)
+        draft_title = draft_data.get("title", "")
+        draft_content = draft_data.get("content", "")
+        logger.info(f"     初稿标题: {draft_title[:20]}...")
+    except json.JSONDecodeError:
+        logger.error("初稿解析失败，跳过 humanizer 优化")
+        return "", tweet_text
+
+    # 第二步：使用 humanizer-zh 规则优化
+    logger.info("  -> [2/3] Humanizer 去AI味优化...")
+    draft_for_humanize = json.dumps({
+        "title": draft_title,
+        "content": draft_content
+    }, ensure_ascii=False)
+
+    humanize_prompt = HUMANIZE_PROMPT_V2.format(draft=draft_for_humanize)
+    humanized_json_str = llm_call(humanize_prompt, temperature=0.7)
+
+    try:
+        humanized_data = json.loads(humanized_json_str)
+        humanized_title = humanized_data.get("title", draft_title)
+        humanized_content = humanized_data.get("content", draft_content)
+        logger.info(f"     优化后标题: {humanized_title[:20]}...")
+    except json.JSONDecodeError:
+        logger.warning("Humanizer 输出解析失败，使用初稿")
+        humanized_title, humanized_content = draft_title, draft_content
+
+    # 第三步：最终清理和截断
+    logger.info("  -> [3/3] 最终清理...")
+
+    final_title = humanized_title[:20]  # 强行截断 20 字
+    final_content = humanized_content
+
+    # 清理排版
+    final_content = final_content.replace('\\n', '\n')
+    final_content = re.sub(r'\n{3,}', '\n\n', final_content).strip()
+
+    logger.info("✅ AI 文案生成完毕（已应用 humanizer 优化）！")
+    return final_title, final_content
 
 
 def score_tweet_potential(tweet_text: str, media_count: int = 0) -> tuple[int, str]:
@@ -584,12 +628,13 @@ def generate_natural_xhs_note(original_text: str, rag_examples: str = "") -> tup
     # 第一步: 生成初稿
     logger.info("  -> [1/3] 生成初稿中...")
     draft_json = llm_call(full_prompt, temperature=0.7)
-    
-    # 第二步：去AI味
-    logger.info("  -> [2/3] 进行去AI味改写...")
-    humanize_prompt = HUMANIZE_PROMPT.format(draft=draft_json) + f"\n\n{json_instruction}"
+
+    # 第二步：去AI味（使用增强版 humanizer-zh 规则）
+    logger.info("  -> [2/3] 进行去AI味改写（humanizer-zh）...")
+    from src.ai.prompts import HUMANIZE_PROMPT_V2
+    humanize_prompt = HUMANIZE_PROMPT_V2.format(draft=draft_json)
     natural_json = llm_call(humanize_prompt, temperature=0.7)
-    
+
     # 第三步：自检
     logger.info("  -> [3/3] 终稿自检自纠...")
     reflect_prompt = REFLECT_PROMPT.format(text=natural_json) + f"\n\n{json_instruction}"
