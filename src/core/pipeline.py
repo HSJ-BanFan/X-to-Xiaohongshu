@@ -50,10 +50,6 @@ from config import (
 from src.automation.scraper import XScraper
 from src.automation.poster import XiaohongshuPoster
 from src.utils.processor import process_images_for_xhs, translate_text
-
-# ==========================================
-# 日志配置
-# ==========================================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",

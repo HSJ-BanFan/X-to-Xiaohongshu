@@ -550,7 +550,62 @@ def generate_hybrid_note(
             content = re.sub(r'\n{3,}', '\n\n', content).strip()
             content = data.get("content", "")
 
-            logger.info(f"✅ 混合模式生成完毕！标题: {title}")
+            # ========== Humanizer 后处理（去AI味）==========
+            if LLM_API_KEY:
+                logger.info("  -> [后处理] 进行 humanizer 去AI味优化...")
+                from src.ai.prompts import HUMANIZE_PROMPT_V2
+
+                draft_json = json.dumps({"title": title, "content": content}, ensure_ascii=False)
+
+                # 构建 LLM 调用
+                headers_llm = {
+                    "Authorization": f"Bearer {LLM_API_KEY}",
+                    "Content-Type": "application/json",
+                }
+
+                def llm_call_humanize(prompt_text, temperature=0.7):
+                    payload = {
+                        "model": LLM_MODEL,
+                        "messages": [
+                            {"role": "system", "content": "你是一个输出纯 JSON 的 API 服务器。不要输出任何多余说明，不要加Markdown。"},
+                            {"role": "user", "content": prompt_text}
+                        ],
+                        "temperature": temperature,
+                        "response_format": {"type": "json_object"}
+                    }
+                    session_llm = requests.Session()
+                    session_llm.trust_env = False
+                    for attempt in range(1, MAX_RETRIES + 1):
+                        try:
+                            resp = session_llm.post(f"{LLM_BASE_URL}/chat/completions", headers=headers_llm, json=payload, timeout=60)
+                            resp.raise_for_status()
+                            reply = resp.json()["choices"][0]["message"]["content"].strip()
+                            if reply.startswith("```json"): reply = reply[7:]
+                            if reply.startswith("```"): reply = reply[3:]
+                            if reply.endswith("```"): reply = reply[:-3]
+                            return reply.strip()
+                        except Exception as e:
+                            if attempt < MAX_RETRIES:
+                                time.sleep(RETRY_DELAY)
+                            else:
+                                logger.error(f"Humanizer LLM调用失败: {e}")
+                                return "{}"
+                    return "{}"
+
+                humanize_prompt = HUMANIZE_PROMPT_V2.format(draft=draft_json)
+                natural_json = llm_call_humanize(humanize_prompt)
+
+                try:
+                    data_humanized = json.loads(natural_json)
+                    title = data_humanized.get("title", "")[:20]
+                    content = data_humanized.get("content", "")
+                    content = content.replace('\\n', '\n')
+                    content = re.sub(r'\n{3,}', '\n\n', content).strip()
+                    logger.info("  -> ✅ Humanizer 优化完成")
+                except Exception as e:
+                    logger.warning(f"Humanizer 解析失败，保留原内容: {e}")
+
+            logger.info(f"✅ 混合模式生成完毕（已应用 humanizer）！标题: {title}")
             return title, content
 
         except Exception as e:

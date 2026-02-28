@@ -170,3 +170,6 @@ def get_json_structure_instruction() -> str:
     "content": "完整的正文排版内容"
 }
 """
+
+# 从 prompts_fixed 导入 humanizer 提示词
+from src.ai.prompts_fixed import HUMANIZE_PROMPT_V2
